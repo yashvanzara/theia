@@ -26,17 +26,9 @@ export interface CopilotModelDescription {
      */
     id: string;
     /**
-     * The model ID as used by the Copilot API (e.g., 'gpt-4o', 'claude-3.5-sonnet').
+     * The model ID as used by the Copilot API (e.g., 'gpt-5.5', 'claude-sonnet-5').
      */
     model: string;
-    /**
-     * Indicate whether the streaming API shall be used.
-     */
-    enableStreaming: boolean;
-    /**
-     * Flag to configure whether the model supports structured output.
-     */
-    supportsStructuredOutput: boolean;
     /**
      * Maximum number of retry attempts when a request fails.
      */
@@ -56,4 +48,9 @@ export interface CopilotLanguageModelsManager {
      * Refresh the status of all Copilot models (e.g., after authentication state changes).
      */
     refreshModelsStatus(): Promise<void>;
+    /**
+     * Fetches the list of available model IDs from the Copilot CLI.
+     * Requires the CLI to be signed in. Returns an empty array otherwise or if the call fails.
+     */
+    fetchAvailableModelIds(): Promise<string[]>;
 }

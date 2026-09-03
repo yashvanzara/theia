@@ -22,7 +22,13 @@
       "path": "../ai-core"
     },
     {
+      "path": "../ai-core-ui"
+    },
+    {
       "path": "../ai-mcp"
+    },
+    {
+      "path": "../ai-terminal"
     },
     {
       "path": "../core"
@@ -32,6 +38,9 @@
     },
     {
       "path": "../editor"
+    },
+    {
+      "path": "../file-search"
     },
     {
       "path": "../filesystem"

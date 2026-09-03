@@ -19,6 +19,8 @@ import {
     ChatResponseContent,
     CodeChatResponseContentImpl,
     CommandChatResponseContentImpl,
+    CompactionChatResponseContentImpl,
+    CompactionContentData,
     ErrorChatResponseContentImpl,
     HorizontalLayoutChatResponseContentImpl,
     InformationalChatResponseContentImpl,
@@ -28,6 +30,7 @@ import {
     TextChatResponseContentImpl,
     ThinkingChatResponseContentImpl,
     ToolCallChatResponseContentImpl,
+    ServerToolCallChatResponseContentImpl,
     UnknownChatResponseContentImpl,
     TextContentData,
     ThinkingContentData,
@@ -35,6 +38,7 @@ import {
     InformationalContentData,
     CodeContentData,
     ToolCallContentData,
+    ServerToolCallContentData,
     CommandContentData,
     HorizontalLayoutContentData,
     ProgressContentData,
@@ -42,6 +46,7 @@ import {
     QuestionContentData
 } from './chat-model';
 import { SerializableChatResponseContentData } from './chat-model-serialization';
+import { createToolCallError } from '@theia/ai-core/lib/common/language-model';
 import { ContributionProvider, ILogger, MaybePromise } from '@theia/core';
 
 export const ChatContentDeserializer = Symbol('ChatContentDeserializer');
@@ -189,7 +194,7 @@ export class ChatContentDeserializerRegistryImpl implements ChatContentDeseriali
     @inject(ContributionProvider) @named(ChatContentDeserializerContribution)
     protected readonly deserializerContributions: ContributionProvider<ChatContentDeserializerContribution>;
 
-    @inject(ILogger) @named('ChatContentDeserializerRegistry')
+    @inject(ILogger) @named('ai-chat:ChatContentDeserializerRegistryImpl')
     protected readonly logger: ILogger;
 
     /**
@@ -248,6 +253,15 @@ export class DefaultChatContentDeserializerContribution implements ChatContentDe
         });
 
         registry.register({
+            kind: 'compaction',
+            deserialize: (data: CompactionContentData) => new CompactionChatResponseContentImpl(
+                data.provider,
+                data.data,
+                data.summary
+            )
+        });
+
+        registry.register({
             kind: 'markdownContent',
             deserialize: (data: MarkdownContentData) => new MarkdownChatResponseContentImpl(data.content)
         });
@@ -268,11 +282,32 @@ export class DefaultChatContentDeserializerContribution implements ChatContentDe
 
         registry.register({
             kind: 'toolCall',
-            deserialize: (data: ToolCallContentData) => new ToolCallChatResponseContentImpl(
+            deserialize: (data: ToolCallContentData) => {
+                // Restored tool calls have no live handler, so always mark them finished.
+                // A persisted (partial) result is preserved as-is; otherwise we synthesize
+                // a stand-in so the LLM history stays valid when the chat continues.
+                const result = data.result ?? createToolCallError(
+                    'Tool call was interrupted. No result is available.'
+                );
+                return new ToolCallChatResponseContentImpl(
+                    data.id,
+                    data.name,
+                    data.arguments,
+                    true,
+                    result,
+                    data.data
+                );
+            }
+        });
+
+        registry.register({
+            kind: 'serverToolCall',
+            // Server tools are executed by the provider; a restored call is always finished.
+            deserialize: (data: ServerToolCallContentData) => new ServerToolCallChatResponseContentImpl(
                 data.id,
                 data.name,
                 data.arguments,
-                data.finished,
+                true,
                 data.result,
                 data.data
             )
@@ -314,14 +349,21 @@ export class DefaultChatContentDeserializerContribution implements ChatContentDe
 
         registry.register({
             kind: 'question',
-            deserialize: (data: QuestionContentData) =>
-                // Restore in read-only mode (no handler/request)
-                new QuestionResponseContentImpl(
+            // Restore in read-only mode (no handler/request)
+            deserialize: (data: QuestionContentData) => data.multiSelect
+                ? new QuestionResponseContentImpl(
                     data.question,
                     data.options,
                     undefined,
                     undefined,
-                    data.selectedOption
+                    { multiSelect: true, header: data.header, selectedOptions: data.selectedOptions }
+                )
+                : new QuestionResponseContentImpl(
+                    data.question,
+                    data.options,
+                    undefined,
+                    undefined,
+                    { header: data.header, selectedOption: data.selectedOption }
                 )
         });
     }

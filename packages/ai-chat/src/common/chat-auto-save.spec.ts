@@ -25,7 +25,7 @@ import { ILogger } from '@theia/core';
 import { ChatAgentLocation } from './chat-agents';
 import { ChatContentDeserializerRegistry, ChatContentDeserializerRegistryImpl, DefaultChatContentDeserializerContribution } from './chat-content-deserializer';
 import { ChangeSetElementDeserializerRegistry, ChangeSetElementDeserializerRegistryImpl } from './change-set-element-deserializer';
-import { ChatModel } from './chat-model';
+import { ChatModel, MutableChatModel } from './chat-model';
 import { SerializedChatData } from './chat-model-serialization';
 import { ParsedChatRequest, ParsedChatRequestTextPart } from './parsed-chat-request';
 
@@ -89,11 +89,17 @@ describe('Chat Auto-Save Mechanism', () => {
             invoke: () => Promise.resolve()
         };
 
+        readonly onDidChangeAgents = { dispose: () => { } };
+        readonly onDefaultAgentChanged = { dispose: () => { } };
+
         getAgent(id: string): typeof this.testAgent | undefined {
             return id === 'test-agent' ? this.testAgent : undefined;
         }
         getAgents(): typeof this.testAgent[] {
             return [this.testAgent];
+        }
+        resolveAgent(): typeof this.testAgent {
+            return this.testAgent;
         }
     }
 
@@ -131,6 +137,7 @@ describe('Chat Auto-Save Mechanism', () => {
 
     const mockToolInvocationRegistry: ToolInvocationRegistry = {
         registerTool: () => { },
+        unregisterTool: () => { },
         getFunction: () => undefined,
         getFunctions: () => [],
         getAllFunctions: () => [],
@@ -232,6 +239,23 @@ describe('Chat Auto-Save Mechanism', () => {
 
             // Verify no auto-save occurred
             expect(sessionStore.saveCount).to.equal(0);
+        });
+    });
+
+    describe('Auto-save on settings changes', () => {
+        it('should auto-save when per-session settings change', async () => {
+            const session = chatService.createSession(ChatAgentLocation.Panel);
+            // Non-empty session so saveSession does not skip it.
+            await chatService.sendRequest(session.id, { text: 'Test request' });
+            sessionStore.reset();
+
+            // A selector-only / dialog-only settings change must trigger persistence.
+            (session.model as MutableChatModel).setSettings({ commonSettings: { modelId: 'test/model' } });
+
+            // Wait for auto-save to complete (debounce is 500ms + execution time)
+            await new Promise(resolve => setTimeout(resolve, 700));
+
+            expect(sessionStore.saveCount).to.be.greaterThan(0);
         });
     });
 

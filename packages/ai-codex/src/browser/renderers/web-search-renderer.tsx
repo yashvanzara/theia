@@ -17,8 +17,8 @@
 import { ChatResponsePartRenderer } from '@theia/ai-chat-ui/lib/browser/chat-response-part-renderer';
 import { ChatResponseContent } from '@theia/ai-chat/lib/common';
 import { codicon } from '@theia/core/lib/browser';
-import { nls } from '@theia/core';
-import { injectable } from '@theia/core/shared/inversify';
+import { nls, ILogger } from '@theia/core';
+import { injectable, inject, named } from '@theia/core/shared/inversify';
 import * as React from '@theia/core/shared/react';
 import { ReactNode } from '@theia/core/shared/react';
 import type { WebSearchItem } from '@openai/codex-sdk';
@@ -26,6 +26,9 @@ import { CodexToolCallChatResponseContent } from '../codex-tool-call-content';
 
 @injectable()
 export class WebSearchRenderer implements ChatResponsePartRenderer<CodexToolCallChatResponseContent> {
+
+    @inject(ILogger) @named('ai-codex:WebSearchRenderer')
+    protected readonly logger: ILogger;
 
     canHandle(response: ChatResponseContent): number {
         return response.kind === 'toolCall' &&
@@ -43,7 +46,7 @@ export class WebSearchRenderer implements ChatResponsePartRenderer<CodexToolCall
                     ? JSON.parse(content.result)
                     : content.result as WebSearchItem;
             } catch (error) {
-                console.error('Failed to parse web_search result:', error);
+                this.logger.error('Failed to parse web_search result:', error);
                 return undefined;
             }
         }
@@ -66,7 +69,7 @@ const WebSearchInProgressComponent: React.FC<{ query: string }> = ({ query }) =>
                 <span className="codex-tool command">{query}</span>
             </div>
             <div className="codex-tool header-right">
-                <span className="codex-tool badge">{nls.localize('theia/ai/codex/webSearch', 'Web Search')}</span>
+                <span className="codex-tool badge">{nls.localizeByDefault('Web Search')}</span>
             </div>
         </div>
     </div>
@@ -81,7 +84,7 @@ const WebSearchCompletedComponent: React.FC<{ item: WebSearchItem }> = ({ item }
                 <span className="codex-tool command">{item.query}</span>
             </div>
             <div className="codex-tool header-right">
-                <span className="codex-tool badge">{nls.localize('theia/ai/codex/webSearch', 'Web Search')}</span>
+                <span className="codex-tool badge">{nls.localizeByDefault('Web Search')}</span>
             </div>
         </div>
     </div>

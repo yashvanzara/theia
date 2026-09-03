@@ -128,7 +128,7 @@ export class KeybindingRegistry {
     @inject(StatusBar)
     protected readonly statusBar: StatusBar;
 
-    @inject(ILogger)
+    @inject(ILogger) @named('core:KeybindingRegistry')
     protected readonly logger: ILogger;
 
     @inject(ContextKeyService)
@@ -399,11 +399,14 @@ export class KeybindingRegistry {
      * Get a user visible representation of a key code (a key with modifiers).
      * @returns a string representing the {@link KeyCode}
      * @param keyCode the keycode
-     * @param separator the separator used to separate keys (key and modifiers) in the returning string
+     * @param separator the separator used to separate keys (key and modifiers) in the returning string.
+     * Ignored when rendering macOS symbols (i.e. on macOS with `asciiOnly=false`), as the convention is
+     * to juxtapose modifier symbols without a separator (e.g. `⌃⌘V`).
      * @param asciiOnly if `true`, no special characters will be substituted into the string returned. Ensures correct keyboard shortcuts in Electron menus.
      */
     acceleratorForKeyCode(keyCode: KeyCode, separator: string = ' ', asciiOnly = false): string {
-        return this.componentsForKeyCode(keyCode, asciiOnly).join(separator);
+        const useSymbols = isOSX && !asciiOnly;
+        return this.componentsForKeyCode(keyCode, asciiOnly).join(useSymbols ? '' : separator);
     }
 
     componentsForKeyCode(keyCode: KeyCode, asciiOnly = false): string[] {
@@ -542,7 +545,7 @@ export class KeybindingRegistry {
             if (command) {
                 if (this.commandRegistry.isEnabled(binding.command, binding.args)) {
                     this.commandRegistry.executeCommand(binding.command, binding.args)
-                        .catch(e => console.error('Failed to execute command:', e));
+                        .catch(e => this.logger.error('Failed to execute command:', e));
                 }
 
                 /* Note that if a keybinding is in context but the command is
@@ -607,11 +610,10 @@ export class KeybindingRegistry {
     }
 
     registerEventListeners(win: Window): Disposable {
-        /* vvv HOTFIX begin vvv
-        *
-        * This is a hotfix against issues eclipse/theia#6459 and gitpod-io/gitpod#875 .
-        * It should be reverted after Theia was updated to the newer Monaco.
-        */
+        // IME composition tracking for the textarea-based editor input path,
+        // where compositionstart/compositionend bubble through the DOM.
+        // (For the native EditContext path, these events never reach the DOM;
+        // the keydown handler below uses additional checks for that case.)
         let inComposition = false;
         const compositionStart = () => {
             inComposition = true;
@@ -624,9 +626,15 @@ export class KeybindingRegistry {
         win.document.addEventListener('compositionend', compositionEnd);
 
         const keydown = (event: KeyboardEvent) => {
-            if (inComposition !== true) {
-                this.run(event);
+            // Skip IME-related keydowns. `inComposition` covers the textarea input path;
+            // `isComposing` and `keyCode === 229` cover the native EditContext path where
+            // composition events don't reach the DOM. The keyCode check catches keys that
+            // finalize a composition (e.g. arrow keys) where isComposing is already false.
+            // eslint-disable-next-line deprecation/deprecation
+            if (inComposition || event.isComposing || event.keyCode === 229) {
+                return;
             }
+            this.run(event);
         };
         win.document.addEventListener('keydown', keydown, true);
 

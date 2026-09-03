@@ -14,7 +14,7 @@
 // SPDX-License-Identifier: EPL-2.0 OR GPL-2.0-only WITH Classpath-exception-2.0
 // *****************************************************************************
 
-import { inject, injectable } from '@theia/core/shared/inversify';
+import { inject, injectable, named } from '@theia/core/shared/inversify';
 import { AbstractTextToModelParsingChatAgent, SystemMessageDescription } from '@theia/ai-chat/lib/common/chat-agents';
 import { AIVariableContext, LanguageModelRequirement } from '@theia/ai-core';
 import {
@@ -30,6 +30,7 @@ import {
     MessageService,
     generateUuid,
     nls,
+    ILogger
 } from '@theia/core';
 
 import { commandTemplate } from './command-prompt-template';
@@ -48,21 +49,25 @@ export class CommandChatAgent extends AbstractTextToModelParsingChatAgent<Parsed
     @inject(MessageService)
     protected messageService: MessageService;
 
+    @inject(ILogger) @named('ai-ide:CommandChatAgent')
+    protected override readonly logger: ILogger;
+
     id: string = 'Command';
     name = 'Command';
     languageModelRequirements: LanguageModelRequirement[] = [{
         purpose: 'command',
-        identifier: 'default/universal',
+        identifier: 'default/fast',
     }];
+    override iconClass: string = 'codicon codicon-server-process';
     protected defaultLanguageModelPurpose: string = 'command';
 
     override description = nls.localize('theia/ai/ide/commandAgent/description',
-        'This agent is aware of all commands that the user can execute within the Theia IDE, the tool that the user is currently working with. ' +
+        'This agent is aware of all commands that the user can execute. ' +
         'Based on the user request, it can find the right command and then let the user execute it.');
     override prompts = [commandTemplate];
     override agentSpecificVariables = [{
         name: 'command-ids',
-        description: nls.localize('theia/ai/ide/commandAgent/vars/commandIds/description', 'The list of available commands in Theia.'),
+        description: nls.localize('theia/ai/ide/commandAgent/vars/commandIds/description', 'The list of available commands.'),
         usedInPrompt: true
     }];
 
@@ -102,7 +107,7 @@ export class CommandChatAgent extends AbstractTextToModelParsingChatAgent<Parsed
         if (parsedCommand.type === 'theia-command') {
             const theiaCommand = this.commandRegistry.getCommand(parsedCommand.commandId);
             if (theiaCommand === undefined) {
-                console.error(`No Theia Command with id ${parsedCommand.commandId}`);
+                this.logger.error(`No Theia Command with id ${parsedCommand.commandId}`);
                 request.cancel();
             }
             const args = parsedCommand.arguments !== undefined &&

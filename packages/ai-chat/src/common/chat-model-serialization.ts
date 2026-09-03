@@ -14,7 +14,9 @@
 // SPDX-License-Identifier: EPL-2.0 OR GPL-2.0-only WITH Classpath-exception-2.0
 // *****************************************************************************
 
+import { GenericCapabilitySelections } from '@theia/ai-core';
 import { ChatAgentLocation } from './chat-agents';
+import { ChatSessionSettings, ResponseTokenUsage } from './chat-model';
 
 export interface SerializableChangeSetElement {
     kind?: string;
@@ -58,6 +60,8 @@ export interface SerializableVariablePart extends SerializableParsedRequestPartB
 export interface SerializableFunctionPart extends SerializableParsedRequestPartBase {
     kind: 'function';
     toolRequestId: string;
+    /** True if the tool reference was marked as deferred (`~?id` / `~{?id}`). */
+    deferred?: boolean;
 }
 
 export interface SerializableAgentPart extends SerializableParsedRequestPartBase {
@@ -74,6 +78,8 @@ export type SerializableParsedRequestPart =
 
 export interface SerializableToolRequest {
     id: string;
+    /** True if this tool reference was marked as deferred. */
+    deferred?: boolean;
 }
 
 export interface SerializableResolvedVariable {
@@ -99,6 +105,20 @@ export interface SerializableChatRequestData {
         elements: SerializableChangeSetElement[];
     };
     parsedRequest?: SerializableParsedRequest;
+    /**
+     * Capability overrides for this request.
+     * Maps capability fragment IDs to enabled/disabled state.
+     */
+    capabilityOverrides?: Record<string, boolean>;
+    /**
+     * Generic capability selections for this request.
+     * Contains user-selected skills, functions, MCP tools, etc.
+     */
+    genericCapabilitySelections?: GenericCapabilitySelections;
+    /**
+     * Server tool selections for this request, keyed by model vendor.
+     */
+    serverToolSelections?: Record<string, string[]>;
 }
 
 export interface SerializableChatResponseContentData<T = unknown> {
@@ -118,6 +138,9 @@ export interface SerializableChatResponseData {
     errorMessage?: string;
     promptVariantId?: string;
     isPromptVariantEdited?: boolean;
+    /** Identifier of the language model that produced this response, if recorded. */
+    languageModel?: string;
+    tokenUsage?: ResponseTokenUsage;
     content: SerializableChatResponseContentData[];
 }
 
@@ -168,6 +191,11 @@ export interface SerializedChatModel {
     requests: SerializableChatRequestData[];
     /** All responses for the requests */
     responses: SerializableChatResponseData[];
+    /**
+     * Per-session settings (e.g. the per-session model override) so they survive a reload and the
+     * chat input can restore the correct selection.
+     */
+    settings?: ChatSessionSettings;
 }
 
 /**
@@ -180,6 +208,10 @@ export interface SerializedChatData {
     title?: string;
     model: SerializedChatModel;
     saveDate: number;
+    /** ID of the root session in the delegation chain. */
+    rootSessionId?: string;
+    /** ID of the immediate parent session that delegated this one. */
+    parentSessionId?: string;
 }
 
 export interface SerializableChatsData {

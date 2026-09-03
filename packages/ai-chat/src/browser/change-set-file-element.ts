@@ -15,10 +15,10 @@
 // *****************************************************************************
 
 import { ConfigurableInMemoryResources, ConfigurableMutableReferenceResource } from '@theia/ai-core';
-import { CancellationToken, DisposableCollection, Emitter, nls, URI } from '@theia/core';
+import { CancellationToken, DisposableCollection, Emitter, nls, URI, ILogger } from '@theia/core';
 import { ConfirmDialog } from '@theia/core/lib/browser';
 import { Replacement } from '@theia/core/lib/common/content-replacer';
-import { inject, injectable, postConstruct } from '@theia/core/shared/inversify';
+import { inject, injectable, postConstruct, named } from '@theia/core/shared/inversify';
 import { EditorPreferences } from '@theia/editor/lib/common/editor-preferences';
 import { FileSystemPreferences } from '@theia/filesystem/lib/common';
 import { FileService } from '@theia/filesystem/lib/browser/file-service';
@@ -32,7 +32,9 @@ import { IInstantiationService } from '@theia/monaco-editor-core/esm/vs/platform
 import { MonacoTextModelService } from '@theia/monaco/lib/browser/monaco-text-model-service';
 import { insertFinalNewline } from '@theia/monaco/lib/browser/monaco-utilities';
 import { MonacoEditorModel } from '@theia/monaco/lib/browser/monaco-editor-model';
+import { MonacoWorkspace } from '@theia/monaco/lib/browser/monaco-workspace';
 import { ChangeSetElement } from '../common';
+import { FileReadTracker } from '../common/file-read-tracker';
 import { SerializableChangeSetElement } from '../common/chat-model-serialization';
 import { createChangeSetFileUri } from './change-set-file-resource';
 import { ChangeSetFileService } from './change-set-file-service';
@@ -99,6 +101,14 @@ export class ChangeSetFileElement implements ChangeSetElement {
 
     @inject(MonacoCodeActionService)
     protected readonly codeActionService: MonacoCodeActionService;
+
+    @inject(ILogger) @named('ai-chat:ChangeSetFileElement')
+    protected readonly logger: ILogger;
+    @inject(MonacoWorkspace)
+    protected readonly monacoWorkspace: MonacoWorkspace;
+
+    @inject(FileReadTracker)
+    protected readonly fileReadTracker: FileReadTracker;
 
     protected readonly toDispose = new DisposableCollection();
     protected _state: ChangeSetElementState;
@@ -255,7 +265,7 @@ export class ChangeSetFileElement implements ChangeSetElement {
 
     get originalContent(): string | undefined {
         if (!this._initialized && this._initializationPromise) {
-            console.warn('Accessing originalContent before initialization is complete. Consider using async methods.');
+            this.logger.warn('Accessing originalContent before initialization is complete. Consider using async methods.');
         }
         return this._originalContent;
     }
@@ -297,13 +307,12 @@ export class ChangeSetFileElement implements ChangeSetElement {
         if (this.type === 'delete') {
             await this.changeSetFileService.delete(this.uri);
             this.state = 'applied';
-            this.changeSetFileService.closeDiff(this.readOnlyUri);
-            return;
+        } else {
+            await this.applyChangesWithMonaco(contents);
         }
-
-        // Load Monaco model for the base file URI and apply changes
-        await this.applyChangesWithMonaco(contents);
         this.changeSetFileService.closeDiff(this.readOnlyUri);
+        // Re-snapshot so the agent's own write is not reported back as external, reading because code actions and formatting on save alter the target state.
+        await this.fileReadTracker.recordRead(this.elementProps.chatSessionId, this.uri);
     }
 
     async writeChanges(contents?: string): Promise<void> {
@@ -313,29 +322,29 @@ export class ChangeSetFileElement implements ChangeSetElement {
 
     /**
      * Applies changes using Monaco utilities, including loading the model for the base file URI,
-     * setting the value to the intended state, and running code actions on save.
+     * applying edits, and running code actions on save.
      */
     protected async applyChangesWithMonaco(contents?: string): Promise<void> {
         let modelReference: IReference<MonacoEditorModel> | undefined;
-
         try {
             modelReference = await this.monacoTextModelService.createModelReference(this.uri);
             const model = modelReference.object;
             model.suppressOpenEditorWhenDirty = true;
             const targetContent = contents ?? this.targetState;
-            model.textEditorModel.setValue(targetContent);
-
+            const currentContent = model.textEditorModel.getValue();
+            if (currentContent !== targetContent) {
+                const fullRange = model.textEditorModel.getFullModelRange();
+                await this.monacoWorkspace.applyBackgroundEdit(model,
+                    [{ range: fullRange, text: targetContent, forceMoveMarkers: false }]);
+            }
             const languageId = model.languageId;
             const uriStr = this.uri.toString();
-
             await this.codeActionService.applyOnSaveCodeActions(model.textEditorModel, languageId, uriStr, CancellationToken.None);
             await this.applyFormatting(model, languageId, uriStr);
-
             await model.save();
             this.state = 'applied';
-
         } catch (error) {
-            console.error('Failed to apply changes with Monaco:', error);
+            this.logger.error('Failed to apply changes with Monaco:', error);
             await this.writeChanges(contents);
         } finally {
             modelReference?.dispose();
@@ -387,7 +396,7 @@ export class ChangeSetFileElement implements ChangeSetElement {
                 this._changeResource?.update({ contents: this.targetState });
             }
         } catch (error) {
-            console.warn('Failed to apply code actions to target state:', error);
+            this.logger.warn('Failed to apply code actions to target state:', error);
             this._targetStateWithCodeActions = targetState;
         } finally {
             tempModel?.dispose();
@@ -425,7 +434,7 @@ export class ChangeSetFileElement implements ChangeSetElement {
                 insertFinalNewline(model);
             }
         } catch (error) {
-            console.warn('Failed to apply formatting:', error);
+            this.logger.warn('Failed to apply formatting:', error);
         }
     }
 

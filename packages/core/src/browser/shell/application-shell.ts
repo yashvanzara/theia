@@ -14,7 +14,7 @@
 // SPDX-License-Identifier: EPL-2.0 OR GPL-2.0-only WITH Classpath-exception-2.0
 // *****************************************************************************
 
-import { injectable, inject, optional, postConstruct } from 'inversify';
+import { injectable, inject, optional, postConstruct, named } from 'inversify';
 import { ArrayExt, find, toArray, each } from '@lumino/algorithm';
 import {
     BoxLayout, BoxPanel, DockLayout, DockPanel, FocusTracker, Layout, Panel, SplitLayout,
@@ -46,6 +46,7 @@ import { OpenerService } from '../opener-service';
 import { PreviewableWidget } from '../widgets/previewable-widget';
 import { WindowService } from '../window/window-service';
 import { TheiaSplitPanel } from './theia-split-panel';
+import { ILogger } from '../../common/logger';
 
 /** The class name added to ApplicationShell instances. */
 export const APPLICATION_SHELL_CLASS = 'theia-ApplicationShell';
@@ -180,6 +181,12 @@ interface WidgetDragState {
 }
 
 export const MAXIMIZED_CLASS = 'theia-maximized';
+export const WidgetAreaResolver = Symbol('WidgetAreaResolver');
+export interface WidgetAreaResolver {
+    resolveArea(widgetId: string, requestedArea: ApplicationShell.Area): ApplicationShell.Area | undefined;
+    setActivePlacementMap(map: Map<string, ApplicationShell.Area>): void;
+}
+
 /**
  * The application shell manages the top-level widgets of the application. Use this class to
  * add, remove, or activate a widget.
@@ -241,6 +248,9 @@ export class ApplicationShell extends Widget {
 
     @inject(UntitledResourceResolver)
     protected readonly untitledResourceResolver: UntitledResourceResolver;
+
+    @inject(ILogger) @named('core:ApplicationShell')
+    protected readonly logger: ILogger;
 
     protected readonly onDidAddWidgetEmitter = new Emitter<Widget>();
     readonly onDidAddWidget = this.onDidAddWidgetEmitter.event;
@@ -351,6 +361,7 @@ export class ApplicationShell extends Widget {
                 });
             }
         });
+        this.refreshBottomPanelToggleButton();
         this.initializedDeferred.resolve();
     }
 
@@ -595,7 +606,7 @@ export class ApplicationShell extends Widget {
                 const opener = await this.openerService.getOpener(fileUri);
                 opener.open(fileUri);
             } catch (e) {
-                console.info(`no opener found for '${fileUri}'`);
+                this.logger.info(`no opener found for '${fileUri}'`);
             }
         };
 
@@ -685,14 +696,10 @@ export class ApplicationShell extends Widget {
             spacing: 0
         }, area => this.doToggleMaximized(area));
         dockPanel.id = BOTTOM_AREA_ID;
-        dockPanel.widgetAdded.connect((sender, widget) => {
-            this.refreshBottomPanelToggleButton();
-        });
         dockPanel.widgetRemoved.connect((sender, widget) => {
             if (sender.isEmpty) {
                 this.collapseBottomPanel();
             }
-            this.refreshBottomPanelToggleButton();
         }, this);
         dockPanel.node.addEventListener('lm-dragenter', event => {
             // Make sure that the main panel hides its overlay when the bottom panel is expanded
@@ -883,7 +890,6 @@ export class ApplicationShell extends Widget {
                     }
                 });
             }
-            this.refreshBottomPanelToggleButton();
         }
         // Proceed with the main panel once all others are set up
         await this.bottomPanelState.pendingUpdate;
@@ -965,6 +971,20 @@ export class ApplicationShell extends Widget {
         }
     }
 
+    @inject(WidgetAreaResolver) @optional()
+    protected readonly widgetAreaResolver: WidgetAreaResolver | undefined;
+
+    protected resolveWidgetArea(widget: Widget, options?: Readonly<ApplicationShell.WidgetOptions>): Readonly<ApplicationShell.WidgetOptions> | undefined {
+        if (this.widgetAreaResolver && !options?.ref) {
+            const requestedArea = options?.area || 'main';
+            const resolvedArea = this.widgetAreaResolver.resolveArea(widget.id, requestedArea);
+            if (resolvedArea && resolvedArea !== requestedArea) {
+                return { ...options, area: resolvedArea };
+            }
+        }
+        return options;
+    }
+
     /**
      * Add a widget to the application shell. The given widget must have a unique `id` property,
      * which will be used as the DOM id.
@@ -975,10 +995,11 @@ export class ApplicationShell extends Widget {
      */
     async addWidget(widget: Widget, options?: Readonly<ApplicationShell.WidgetOptions>): Promise<void> {
         if (!widget.id) {
-            console.error('Widgets added to the application shell must have a unique id property.');
+            this.logger.error('Widgets added to the application shell must have a unique id property.');
             return;
         }
-        const { area, addOptions } = this.getInsertionOptions(options);
+        const resolvedOptions = this.resolveWidgetArea(widget, options);
+        const { area, addOptions } = this.getInsertionOptions(resolvedOptions);
         const sidePanelOptions: SidePanel.WidgetOptions = { rank: options?.rank };
         switch (area) {
             case 'main':
@@ -1417,7 +1438,7 @@ export class ApplicationShell extends Widget {
         this.toDisposeOnActivationCheck.push(Disposable.create(() => widget.disposed.disconnect(onDispose)));
 
         let start = 0;
-        const step: FrameRequestCallback = () => {
+        const step = (): void => {
             const activeElement = widget.node.ownerDocument.activeElement;
             if (activeElement && widget.node.contains(activeElement)) {
                 return;
@@ -1428,13 +1449,13 @@ export class ApplicationShell extends Widget {
             }
             const delta = now - start;
             if (delta < this.activationTimeout) {
-                request = setTimeout(step, 0);
+                request = window.setTimeout(step, 0);
             } else {
-                console.warn(`Widget was activated, but did not accept focus after ${this.activationTimeout}ms: ${widget.id}`);
+                this.logger.warn(`Widget was activated, but did not accept focus after ${this.activationTimeout}ms: ${widget.id}`);
             }
         };
-        let request = setTimeout(step, 0);
-        this.toDisposeOnActivationCheck.push(Disposable.create(() => window.cancelAnimationFrame(request)));
+        let request = window.setTimeout(step, 0);
+        this.toDisposeOnActivationCheck.push(Disposable.create(() => window.clearTimeout(request)));
     }
 
     /**
@@ -1566,9 +1587,11 @@ export class ApplicationShell extends Widget {
             let size: number | undefined;
             if (bottomPanel.isEmpty) {
                 bottomPanel.node.style.minHeight = '0';
-                size = this.options.bottomPanel.emptySize;
-            } else if (this.bottomPanelState.lastPanelSize) {
+            }
+            if (this.bottomPanelState.lastPanelSize) {
                 size = this.bottomPanelState.lastPanelSize;
+            } else if (bottomPanel.isEmpty) {
+                size = this.options.bottomPanel.emptySize;
             } else {
                 size = this.getDefaultBottomPanelSize();
             }
@@ -1627,24 +1650,20 @@ export class ApplicationShell extends Widget {
      * and refers to the command `core.toggle.bottom.panel`.
      */
     protected refreshBottomPanelToggleButton(): void {
-        if (this.bottomPanel.isEmpty) {
-            this.statusBar.removeElement(BOTTOM_PANEL_TOGGLE_ID);
-        } else {
-            const label = nls.localize('theia/core/common/collapseBottomPanel', 'Toggle Bottom Panel');
-            const element: StatusBarEntry = {
-                name: label,
-                text: '$(codicon-window)',
-                alignment: StatusBarAlignment.RIGHT,
-                tooltip: label,
-                command: 'core.toggle.bottom.panel',
-                accessibilityInformation: {
-                    label: label,
-                    role: 'button'
-                },
-                priority: -1000
-            };
-            this.statusBar.setElement(BOTTOM_PANEL_TOGGLE_ID, element);
-        }
+        const label = nls.localize('theia/core/common/collapseBottomPanel', 'Toggle Bottom Panel');
+        const element: StatusBarEntry = {
+            name: label,
+            text: '$(codicon-window)',
+            alignment: StatusBarAlignment.RIGHT,
+            tooltip: label,
+            command: 'core.toggle.bottom.panel',
+            accessibilityInformation: {
+                label: label,
+                role: 'button'
+            },
+            priority: -1000
+        };
+        this.statusBar.setElement(BOTTOM_PANEL_TOGGLE_ID, element);
     }
 
     /**

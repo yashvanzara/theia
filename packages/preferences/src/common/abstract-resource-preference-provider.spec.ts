@@ -33,6 +33,8 @@ import { MonacoWorkspace } from '@theia/monaco/lib/browser/monaco-workspace';
 import { EditorManager } from '@theia/editor/lib/browser';
 import { PreferenceTransactionFactory } from '../browser/preference-transaction-manager';
 import { JSONValue } from '@theia/core/shared/@lumino/coreutils';
+import { ILogger } from '@theia/core';
+import { MockLogger } from '@theia/core/lib/common/test/mock-logger';
 
 disableJSDOM();
 
@@ -41,7 +43,10 @@ class MockPreferenceStorage implements PreferenceStorage {
     writeValue(key: string, path: string[], value: JSONValue): Promise<boolean> {
         throw new Error('Method not implemented.');
     }
-    dispose(): void { }
+    disposed = false;
+    dispose(): void {
+        this.disposed = true;
+    }
     releaseContent = new Deferred();
     async read(): Promise<string> {
         await this.releaseContent.promise;
@@ -62,6 +67,7 @@ describe('AbstractResourcePreferenceProvider', () => {
     beforeEach(() => {
         preferenceStorage = new MockPreferenceStorage();
         const testContainer = new Container();
+        testContainer.bind(ILogger).to(MockLogger).inSingletonScope();
         bindPreferenceService(testContainer.bind.bind(testContainer));
         bindMockPreferenceProviders(testContainer.bind.bind(testContainer), testContainer.unbind.bind(testContainer));
         testContainer.rebind(<any>PreferenceSchemaService).toConstantValue(mockSchemaProvider);
@@ -90,5 +96,11 @@ describe('AbstractResourcePreferenceProvider', () => {
         preferenceStorage.releaseContent.resolve();
         await provider.ready;
         expect(provider.get('editor.fontSize')).to.equal(20); // The value provided by the mock FileService implementation.
+    });
+
+    it('disposes its preference storage when the provider is disposed', () => {
+        expect(preferenceStorage.disposed).to.be.false;
+        provider.dispose();
+        expect(preferenceStorage.disposed).to.be.true;
     });
 });

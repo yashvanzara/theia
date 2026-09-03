@@ -28,6 +28,8 @@ import { PreferenceScope } from '../../common/preferences/preference-scope';
 import { FrontendApplicationConfigProvider } from '../frontend-application-config-provider';
 import { PreferenceProxyOptions, PreferenceProxy, PreferenceChangeEvent, createPreferenceProxy } from '../../common/preferences/preference-proxy';
 import { PreferenceProxyFactory } from '../../common/preferences/injectable-preference-proxy';
+import { ILogger } from '../../common/logger';
+import { MockLogger } from '../../common/test/mock-logger';
 
 disableJSDOM();
 
@@ -47,6 +49,7 @@ function createTestContainer(): Container {
     const result = new Container();
     bindPreferenceService(result.bind.bind(result));
     bindMockPreferenceProviders(result.bind.bind(result), result.unbind.bind(result));
+    result.bind(ILogger).to(MockLogger);
     return result;
 }
 
@@ -160,6 +163,14 @@ describe('Preference Proxy', () => {
                 expect(proxy['my.pref']).to.equal('foo');
                 expect(proxy.my).to.equal(undefined);
                 expect(Object.keys(proxy).join()).to.equal(['my.pref'].join());
+            });
+
+            it('supports object introspection through Symbol.toStringTag', async () => {
+                const { proxy, promisedSchema } = getProxy();
+                if (promisedSchema) {
+                    await promisedSchema;
+                }
+                expect(Object.prototype.toString.call(proxy)).to.equal('[object Object]');
             });
 
             it('it should provide access in deep style but not flat', async () => {

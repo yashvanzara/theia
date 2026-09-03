@@ -15,15 +15,21 @@
 // *****************************************************************************
 
 import { Event, Emitter, URI, ILogger, DisposableCollection } from '@theia/core';
-import { inject, injectable, optional, postConstruct } from '@theia/core/shared/inversify';
+import { inject, injectable, optional, postConstruct, named } from '@theia/core/shared/inversify';
 import { AIVariableArg, AIVariableContext, AIVariableService, createAIResolveVariableCache, ResolvedAIVariable } from './variable-service';
 import { ToolInvocationRegistry } from './tool-invocation-registry';
 import { toolRequestToPromptText } from './language-model-util';
 import { ToolRequest } from './language-model';
-import { matchFunctionsRegEx, matchVariablesRegEx } from './prompt-service-util';
+import { FRONT_MATTER_REGEX, matchFunctionsRegEx, matchVariablesRegEx, parseFunctionReference, stripFrontMatter } from './prompt-service-util';
 import { AISettingsService } from './settings-service';
 
 export interface CommandPromptFragmentMetadata {
+    /** Display name for this prompt fragment (defaults to fragment id if not specified) */
+    name?: string;
+
+    /** Description of this prompt fragment's purpose */
+    description?: string;
+
     /** Mark this template as available as a slash command */
     isCommand?: boolean;
 
@@ -118,8 +124,43 @@ export interface ResolvedPromptFragment {
     /** All functions referenced in the prompt fragment */
     functionDescriptions?: Map<string, ToolRequest>;
 
+    /**
+     * Ids of functions referenced in the prompt fragment that were marked as
+     * deferred (`~{?functionId}`). Deferred tools should not be loaded into
+     * the model's context upfront. Providers that support deferred tool
+     * loading (e.g. Anthropic, OpenAI) may use this information to set the
+     * appropriate flag on the tool definition and include the tool search
+     * tool in the request.
+     */
+    deferredFunctionIds?: Set<string>;
+
     /** All variables resolved in the prompt fragment */
     variables?: ResolvedAIVariable[];
+}
+
+/**
+ * One alternative prompt template available for a custom agent. Variants are loaded from
+ * `<scope>/agents/<id>/*.prompttemplate` files (one variant per file; id = filename stem).
+ */
+export interface CustomAgentPromptVariant {
+    id: string;
+    template: string;
+}
+
+export namespace CustomAgentPromptVariant {
+    export function equals(a: CustomAgentPromptVariant, b: CustomAgentPromptVariant): boolean {
+        return a.id === b.id && a.template === b.template;
+    }
+
+    export function arrayEquals(a?: readonly CustomAgentPromptVariant[], b?: readonly CustomAgentPromptVariant[]): boolean {
+        const aArr = a ?? [];
+        const bArr = b ?? [];
+        if (aArr.length !== bArr.length) { return false; }
+        for (let i = 0; i < aArr.length; i++) {
+            if (!equals(aArr[i], bArr[i])) { return false; }
+        }
+        return true;
+    }
 }
 
 /**
@@ -135,11 +176,20 @@ export interface CustomAgentDescription {
     /** Description of the agent's purpose and capabilities */
     description: string;
 
-    /** The prompt text for this agent */
+    /** The prompt text for this agent (the default variant body) */
     prompt: string;
 
     /** The default large language model to use with this agent */
     defaultLLM: string;
+
+    /** Whether this agent should appear in the chat UI (defaults to true if not specified) */
+    showInChat?: boolean;
+
+    /**
+     * Optional additional prompt variants for this agent. Loaded from sibling
+     * `.prompttemplate` files in the same `<scope>/agents/<id>/` folder.
+     */
+    promptVariants?: CustomAgentPromptVariant[];
 }
 
 export namespace CustomAgentDescription {
@@ -148,20 +198,53 @@ export namespace CustomAgentDescription {
      */
     export function is(entry: unknown): entry is CustomAgentDescription {
         // eslint-disable-next-line no-null/no-null
-        return typeof entry === 'object' && entry !== null
-            && 'id' in entry && typeof entry.id === 'string'
-            && 'name' in entry && typeof entry.name === 'string'
-            && 'description' in entry && typeof entry.description === 'string'
-            && 'prompt' in entry && typeof entry.prompt === 'string'
-            && 'defaultLLM' in entry && typeof entry.defaultLLM === 'string';
+        if (typeof entry !== 'object' || entry === null) {
+            return false;
+        }
+        if (!('id' in entry && typeof entry.id === 'string')) {
+            return false;
+        }
+        if (!('name' in entry && typeof entry.name === 'string')) {
+            return false;
+        }
+        if (!('description' in entry && typeof entry.description === 'string')) {
+            return false;
+        }
+        if (!('prompt' in entry && typeof entry.prompt === 'string')) {
+            return false;
+        }
+        if (!('defaultLLM' in entry && typeof entry.defaultLLM === 'string')) {
+            return false;
+        }
+        if ('showInChat' in entry && typeof entry.showInChat !== 'boolean') {
+            return false;
+        }
+        return true;
     }
 
     /**
-     * Compares two CustomAgentDescription objects for equality
+     * Compares two CustomAgentDescription objects for equality (including prompt variants).
      */
     export function equals(a: CustomAgentDescription, b: CustomAgentDescription): boolean {
-        return a.id === b.id && a.name === b.name && a.description === b.description && a.prompt === b.prompt && a.defaultLLM === b.defaultLLM;
+        return a.id === b.id
+            && a.name === b.name
+            && a.description === b.description
+            && a.prompt === b.prompt
+            && a.defaultLLM === b.defaultLLM
+            && a.showInChat === b.showInChat
+            && CustomAgentPromptVariant.arrayEquals(a.promptVariants, b.promptVariants);
     }
+}
+
+/**
+ * A discoverable custom-agent location within a single prompt-templates scope. `kind` distinguishes
+ * the per-agent `agents/` directory from the legacy `customAgents.yml` file; consumers should
+ * branch on it rather than inspecting the URI's basename.
+ */
+export interface CustomAgentsLocation {
+    uri: URI;
+    exists: boolean;
+    kind: 'agents-dir' | 'legacy-yaml';
 }
 
 /**
@@ -284,12 +367,56 @@ export interface PromptFragmentCustomizationService {
     getCustomAgents(): Promise<CustomAgentDescription[]>;
 
     /**
-     * Gets the locations of custom agent configuration files
-     * @returns Array of URIs and existence status
+     * Gets the locations of custom agent configuration files. Each scope contributes both an
+     * `agents/` directory entry and a legacy `customAgents.yml` entry, discriminated by
+     * {@link CustomAgentsLocation.kind}.
+     * @returns Array of locations with their kind and existence status
      */
-    getCustomAgentsLocations(): Promise<{ uri: URI, exists: boolean }[]>;
+    getCustomAgentsLocations(): Promise<CustomAgentsLocation[]>;
 
     /**
+     * Creates a per-agent file at `<parentDirectory>/agents/<agent.id>/agent.md` from the given
+     * description, then opens it. Replaces a previously existing `agent.md` for the same id.
+     *
+     * @param parentDirectory The prompt-templates scope (e.g. workspace `.prompts/` or the global templates dir)
+     * @param agent The agent description to serialize
+     * @returns The URI of the created file
+     */
+    createCustomAgentFile(parentDirectory: URI, agent: CustomAgentDescription): Promise<URI>;
+
+    /**
+     * Returns `true` if migration would write anything: a scope still holds a legacy
+     * `customAgents.yml`, or a previously migrated scope has `agent.md` files that can be corrected
+     * (e.g. headings that were folded by an earlier migration). Read-only; performs no writes and is
+     * intended for deciding whether to prompt the user before migrating.
+     */
+    hasPendingCustomAgentMigration(): Promise<boolean>;
+
+    /**
+     * Migrates every reachable `customAgents.yml` to the per-agent `agents/<id>/agent.md` layout and
+     * corrects already-migrated `agent.md` files whose headings were folded by an earlier migration.
+     * The user's original content is never deleted: on success (or on partial failure when no backup
+     * exists yet) the YAML is renamed to `customAgents.yml.bak`; if a `.bak` already exists it is not
+     * overwritten and the YAML is left in place. Corrections only overwrite `agent.md` files the user
+     * has not edited since migration.
+     * Idempotent — rerunning never overwrites an already up-to-date agent file.
+     */
+    migrateCustomAgentsYaml(): Promise<Array<{
+        scope: URI;
+        yamlURI: URI;
+        migrated: number;
+        alreadyPresent: number;
+        failed: number;
+        yamlBackedUp: boolean;
+        promptOverridesMigrated: number;
+        corrected: number;
+    }>>;
+
+    /**
+     * @deprecated Use {@link createCustomAgentFile} to author agents in the new
+     * `<scope>/agents/<id>/agent.md` layout. Kept so legacy callers continue to work
+     * until they are migrated.
+     *
      * Opens an existing customAgents.yml file at the given URI, or creates a new one if it doesn't exist.
      *
      * @param uri The URI of the customAgents.yml file to open or create
@@ -339,6 +466,19 @@ export interface PromptService {
      * @returns The fragment with the matching command name or undefined if not found
      */
     getPromptFragmentByCommandName(commandName: string): PromptFragment | undefined;
+
+    /**
+     * Checks whether `/name` can be resolved as a slash command.
+     *
+     * This mirrors the lookup performed when resolving the `prompt` variable: the name may either be
+     * the command name of a fragment marked as a command, or the id of any existing prompt fragment.
+     * Use this before interpreting a `/name` token as a command, so that unrelated text such as Unix
+     * paths is not mistaken for a command.
+     *
+     * @param name The command name or prompt fragment id
+     * @returns `true` if a matching command or prompt fragment exists
+     */
+    isKnownCommand(name: string): boolean;
 
     /**
      * Resolves a prompt fragment by replacing variables and function references
@@ -416,9 +556,10 @@ export interface PromptService {
      * Gets the effective variant ID and customization state for a prompt fragment.
      * This is a convenience method that combines getEffectiveVariantId and customization check.
      * @param fragmentId The prompt fragment ID or variant set ID
+     * @param modeId Optional mode ID to use as variant override (if it's a valid variant for the fragment)
      * @returns The variant info or undefined if no valid variant exists
      */
-    getPromptVariantInfo(fragmentId: string): PromptVariantInfo | undefined;
+    getPromptVariantInfo(fragmentId: string, modeId?: string): PromptVariantInfo | undefined;
 
     /**
      * Gets the default variant ID of the given set
@@ -466,7 +607,7 @@ export interface PromptService {
 
 @injectable()
 export class PromptServiceImpl implements PromptService {
-    @inject(ILogger)
+    @inject(ILogger) @named('ai-core:PromptServiceImpl')
     protected readonly logger: ILogger;
 
     @inject(AISettingsService) @optional()
@@ -608,7 +749,7 @@ export class PromptServiceImpl implements PromptService {
         }
         return {
             ...rawFragment,
-            template: this.stripComments(rawFragment.template)
+            template: stripFrontMatter(this.stripComments(rawFragment.template))
         };
     }
 
@@ -630,6 +771,15 @@ export class PromptServiceImpl implements PromptService {
         );
     }
 
+    isKnownCommand(name: string): boolean {
+        if (!name) {
+            return false;
+        }
+        // Both lookups are needed because the `prompt` variable resolves a command either by its
+        // command name or, as a fallback, by prompt fragment id.
+        return this.getPromptFragmentByCommandName(name) !== undefined || this.getRawPromptFragment(name) !== undefined;
+    }
+
     /**
      * Strips comments from a template string
      * @param templateText The template text to process
@@ -638,6 +788,35 @@ export class PromptServiceImpl implements PromptService {
     protected stripComments(templateText: string): string {
         const commentRegex = /^\s*{{!--[\s\S]*?--}}\s*\n?/;
         return commentRegex.test(templateText) ? templateText.replace(commentRegex, '').trimStart() : templateText;
+    }
+
+    /**
+     * Extracts metadata fields from YAML front matter in the template and
+     * merges them onto the fragment. Programmatic fields take precedence over
+     * front matter values so callers can still override individual fields.
+     */
+    protected enrichWithFrontMatter(fragment: BasePromptFragment): BasePromptFragment {
+        const match = fragment.template.match(FRONT_MATTER_REGEX);
+        if (!match) {
+            return fragment;
+        }
+        const yamlBlock = match[1];
+        const extracted: Partial<CommandPromptFragmentMetadata> = {};
+        for (const line of yamlBlock.split('\n')) {
+            const kv = line.match(/^\s*(\w+)\s*:\s*(.*?)\s*$/);
+            if (kv) {
+                const [, key, value] = kv;
+                if (key === 'name' && !fragment.name) {
+                    extracted.name = value;
+                } else if (key === 'description' && !fragment.description) {
+                    extracted.description = value;
+                }
+            }
+        }
+        if (extracted.name || extracted.description) {
+            return { ...fragment, ...extracted };
+        }
+        return fragment;
     }
 
     getSelectedVariantId(variantSetId: string): string | undefined {
@@ -675,8 +854,17 @@ export class PromptServiceImpl implements PromptService {
         return undefined;
     }
 
-    getPromptVariantInfo(fragmentId: string): PromptVariantInfo | undefined {
-        const variantId = this.getEffectiveVariantId(fragmentId) ?? fragmentId;
+    getPromptVariantInfo(fragmentId: string, modeId?: string): PromptVariantInfo | undefined {
+        // If modeId is provided and is a valid variant, use it; otherwise use effective variant
+        let variantId: string | undefined;
+        if (modeId) {
+            const variantIds = this.getVariantIds(fragmentId);
+            if (variantIds.includes(modeId)) {
+                variantId = modeId;
+            }
+        }
+        variantId ??= this.getEffectiveVariantId(fragmentId) ?? fragmentId;
+
         const rawFragment = this.getRawPromptFragment(variantId);
         if (!rawFragment) {
             return undefined;
@@ -715,12 +903,16 @@ export class PromptServiceImpl implements PromptService {
         // This allows to resolve function references contained in resolved variables (e.g. prompt fragments)
         const functionMatches = matchFunctionsRegEx(resolvedTemplate);
         const functionMap = new Map<string, ToolRequest>();
+        const deferredFunctionIds = new Set<string>();
         const functionReplacements = functionMatches.map(match => {
             const completeText = match[0];
-            const functionId = match[1];
+            const { id: functionId, deferred } = parseFunctionReference(match[1]);
             const toolRequest = this.toolInvocationRegistry?.getFunction(functionId);
             if (toolRequest) {
                 functionMap.set(toolRequest.id, toolRequest);
+                if (deferred) {
+                    deferredFunctionIds.add(toolRequest.id);
+                }
             }
             return {
                 placeholder: completeText,
@@ -734,6 +926,7 @@ export class PromptServiceImpl implements PromptService {
             id: systemOrFragmentId,
             text: resolvedTemplate,
             functionDescriptions: functionMap.size > 0 ? functionMap : undefined,
+            deferredFunctionIds: deferredFunctionIds.size > 0 ? deferredFunctionIds : undefined,
             variables: variableAndArgResolutions.resolvedVariables
         };
     }
@@ -790,10 +983,12 @@ export class PromptServiceImpl implements PromptService {
             let variableName = variableAndArg;
             let argument: string | undefined;
 
-            const parts = variableAndArg.split(':', 2);
-            if (parts.length > 1) {
-                variableName = parts[0];
-                argument = parts[1];
+            // First colon only, keeping the whole remainder: `split(':', 2)` truncates instead, which
+            // mangles every argument containing a colon, e.g. `{{file:C:\some\path}}`.
+            const separatorIndex = variableAndArg.indexOf(':');
+            if (separatorIndex >= 0) {
+                variableName = variableAndArg.substring(0, separatorIndex);
+                argument = variableAndArg.substring(separatorIndex + 1);
             }
 
             let replacementValue: string;
@@ -960,15 +1155,16 @@ export class PromptServiceImpl implements PromptService {
     }
 
     addBuiltInPromptFragment(promptFragment: BasePromptFragment, promptVariantSetId?: string, isDefault: boolean = false): void {
-        this.checkCommandUniqueness(promptFragment);
+        const enriched = this.enrichWithFrontMatter(promptFragment);
+        this.checkCommandUniqueness(enriched);
 
-        const existingIndex = this._builtInFragments.findIndex(fragment => fragment.id === promptFragment.id);
+        const existingIndex = this._builtInFragments.findIndex(fragment => fragment.id === enriched.id);
         if (existingIndex !== -1) {
             // Replace existing fragment with the same ID
-            this._builtInFragments[existingIndex] = promptFragment;
+            this._builtInFragments[existingIndex] = enriched;
         } else {
             // Add new fragment
-            this._builtInFragments.push(promptFragment);
+            this._builtInFragments.push(enriched);
         }
 
         // If this is a variant of a prompt variant set, record it in the variants map

@@ -178,7 +178,8 @@ export enum CompletionItemKind {
     TypeParameter = 24,
     User = 25,
     Issue = 26,
-    Snippet = 27
+    Tool = 27,
+    Snippet = 28
 }
 
 export class IdObject {
@@ -340,6 +341,11 @@ export interface DocumentHighlight {
 
 export interface DocumentHighlightProvider {
     provideDocumentHighlights(model: monaco.editor.ITextModel, position: monaco.Position, token: monaco.CancellationToken): DocumentHighlight[] | undefined;
+}
+
+export interface MultiDocumentHighlightDto {
+    uri: UriComponents;
+    highlights: DocumentHighlight[];
 }
 
 export interface FormattingOptions {
@@ -854,6 +860,14 @@ export interface InlineCompletionContext {
     readonly triggerKind: InlineCompletionTriggerKind;
 
     readonly selectedSuggestionInfo: SelectedSuggestionInfo | undefined;
+
+    readonly includeInlineEdits: boolean;
+
+    readonly includeInlineCompletions: boolean;
+
+    readonly requestIssuedDateTime: number;
+
+    readonly earliestShownDateTime: number;
 }
 
 export interface SelectedSuggestionInfo {

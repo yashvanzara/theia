@@ -70,6 +70,7 @@ export class PreferenceTreeModel extends TreeModelImpl {
     protected _isFiltered: boolean = false;
     protected _currentRows: Map<string, PreferenceTreeNodeRow> = new Map();
     protected _totalVisibleLeaves = 0;
+    private _suppressSelection = false;
 
     get currentRows(): Readonly<Map<string, PreferenceTreeNodeRow>> {
         return this._currentRows;
@@ -117,7 +118,9 @@ export class PreferenceTreeModel extends TreeModelImpl {
                 if (this.isFiltered) {
                     this.expandAll();
                 } else if (CompositeTreeNode.is(this.root)) {
-                    this.collapseAll(this.root);
+                    const root = this.root;
+                    // Avoid intermediate selection events while collapsing.
+                    this.withSuppressedSelection(() => this.collapseAll(root));
                 }
                 this.updateFilteredRows(PreferenceFilterChangeSource.Search);
             }),
@@ -173,6 +176,10 @@ export class PreferenceTreeModel extends TreeModelImpl {
 
     protected passesCurrentFilters(node: Preference.LeafNode, prefID: string): boolean {
         if (!this.schemaProvider.isValidInScope(prefID, this._currentScope)) {
+            return false;
+        }
+        // Hidden preferences (e.g. AI preferences moved to the AI Configuration view) must not surface in search.
+        if (node.preference.data.hidden) {
             return false;
         }
         if (!this._isFiltered) {
@@ -235,6 +242,21 @@ export class PreferenceTreeModel extends TreeModelImpl {
                     this.expandNode(child);
                 }
             });
+        }
+    }
+
+    override selectNode(node: Readonly<SelectableTreeNode>): void {
+        if (!this._suppressSelection) {
+            super.selectNode(node);
+        }
+    }
+
+    protected withSuppressedSelection(fn: () => void): void {
+        this._suppressSelection = true;
+        try {
+            fn();
+        } finally {
+            this._suppressSelection = false;
         }
     }
 

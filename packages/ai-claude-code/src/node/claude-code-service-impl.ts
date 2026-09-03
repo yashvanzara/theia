@@ -37,15 +37,15 @@ interface ToolApprovalResult {
 @injectable()
 export class ClaudeCodeServiceImpl implements ClaudeCodeService {
 
-    @inject(ILogger) @named('ClaudeCode')
-    private logger: ILogger;
+    @inject(ILogger) @named('ai-claude-code:ClaudeCodeServiceImpl')
+    protected readonly logger: ILogger;
 
     private client: ClaudeCodeClient;
     private abortControllers = new Map<string, AbortController>();
     private pendingApprovals = new Map<string, (result: ToolApprovalResult) => void>();
 
     // Tools that don't require approval - they are safe and non-intrusive
-    protected readonly autoApprovedTools = new Set(['AskUserQuestion']);
+    protected readonly autoApprovedTools = new Set<string>();
 
     setClient(client: ClaudeCodeClient): void {
         this.client = client;

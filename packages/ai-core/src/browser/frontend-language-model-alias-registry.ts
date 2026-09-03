@@ -17,9 +17,10 @@
 import { injectable, inject, postConstruct } from '@theia/core/shared/inversify';
 import { Emitter, Event, nls } from '@theia/core';
 import { LanguageModelAlias, LanguageModelAliasRegistry } from '../common/language-model-alias';
-import { PreferenceScope, PreferenceService } from '@theia/core/lib/common';
+import { PreferenceScope } from '@theia/core/lib/common';
 import { LANGUAGE_MODEL_ALIASES_PREFERENCE } from '../common/ai-core-preferences';
 import { Deferred } from '@theia/core/lib/common/promise-util';
+import { AiConfigurationService } from '../common/ai-configuration-service';
 
 @injectable()
 export class DefaultLanguageModelAliasRegistry implements LanguageModelAliasRegistry {
@@ -28,45 +29,55 @@ export class DefaultLanguageModelAliasRegistry implements LanguageModelAliasRegi
         {
             id: 'default/code',
             defaultModelIds: [
-                'anthropic/claude-opus-4-5',
-                'openai/gpt-5.2',
-                'google/gemini-3-pro-preview'
+                'anthropic/claude-opus-5',
+                'openai/gpt-5.6-sol',
+                'google/gemini-3.1-pro-preview'
             ],
             description: nls.localize('theia/ai/core/defaultModelAliases/code/description', 'Optimized for code understanding and generation tasks.')
         },
         {
             id: 'default/universal',
             defaultModelIds: [
-                'openai/gpt-5.2',
-                'anthropic/claude-opus-4-5',
-                'google/gemini-3-pro-preview'
+                'anthropic/claude-opus-5',
+                'openai/gpt-5.6-sol',
+                'google/gemini-3.1-pro-preview'
             ],
             description: nls.localize('theia/ai/core/defaultModelAliases/universal/description', 'Well-balanced for both code and general language use.')
         },
         {
             id: 'default/code-completion',
             defaultModelIds: [
-                'openai/gpt-4.1',
-                'anthropic/claude-opus-4-5',
-                'google/gemini-3-pro-preview'
+                'anthropic/claude-sonnet-5',
+                'openai/gpt-5.6-sol',
+                'google/gemini-3.1-pro-preview'
             ],
             description: nls.localize('theia/ai/core/defaultModelAliases/code-completion/description', 'Best suited for code autocompletion scenarios.')
         },
         {
             id: 'default/summarize',
             defaultModelIds: [
-                'openai/gpt-5.2',
-                'anthropic/claude-opus-4-5',
-                'google/gemini-3-pro-preview'
+                'anthropic/claude-opus-5',
+                'openai/gpt-5.6-sol',
+                'google/gemini-3.1-pro-preview'
             ],
             description: nls.localize('theia/ai/core/defaultModelAliases/summarize/description', 'Models prioritized for summarization and condensation of content.')
+        },
+        {
+            id: 'default/fast',
+            defaultModelIds: [
+                'anthropic/claude-haiku-4-5',
+                'openai/gpt-5.6-luna',
+                'google/gemini-3.7-flash'
+            ],
+            description: nls.localize('theia/ai/core/defaultModelAliases/fast/description',
+                'Faster and cheaper models for simpler tasks like exploration or basic tool calling, where deep reasoning is not required.')
         }
     ];
     protected readonly onDidChangeEmitter = new Emitter<void>();
     readonly onDidChange: Event<void> = this.onDidChangeEmitter.event;
 
-    @inject(PreferenceService)
-    protected readonly preferenceService: PreferenceService;
+    @inject(AiConfigurationService)
+    protected readonly aiConfigurationService: AiConfigurationService;
 
     protected readonly _ready = new Deferred<void>();
     get ready(): Promise<void> {
@@ -75,11 +86,14 @@ export class DefaultLanguageModelAliasRegistry implements LanguageModelAliasRegi
 
     @postConstruct()
     protected init(): void {
-        this.preferenceService.ready.then(() => {
+        this.aiConfigurationService.ready.then(() => {
             this.loadFromPreference();
-            this.preferenceService.onPreferenceChanged(ev => {
-                if (ev.preferenceName === LANGUAGE_MODEL_ALIASES_PREFERENCE) {
+            this.aiConfigurationService.onDidChange(change => {
+                if (change.affectsPreference(LANGUAGE_MODEL_ALIASES_PREFERENCE)) {
                     this.loadFromPreference();
+                    if (!change.preferenceName) {
+                        this.onDidChangeEmitter.fire();
+                    }
                 }
             });
             this._ready.resolve();
@@ -140,7 +154,7 @@ export class DefaultLanguageModelAliasRegistry implements LanguageModelAliasRegi
      * Load aliases from the persisted setting
      */
     protected loadFromPreference(): void {
-        const stored = this.preferenceService.get<{ [name: string]: { selectedModel: string } }>(LANGUAGE_MODEL_ALIASES_PREFERENCE) || {};
+        const stored = this.aiConfigurationService.get<{ [name: string]: { selectedModel: string } }>(LANGUAGE_MODEL_ALIASES_PREFERENCE) || {};
         this.aliases.forEach(alias => {
             if (stored[alias.id] && stored[alias.id].selectedModel) {
                 alias.selectedModelId = stored[alias.id].selectedModel;
@@ -160,6 +174,6 @@ export class DefaultLanguageModelAliasRegistry implements LanguageModelAliasRegi
                 map[alias.id] = { selectedModel: alias.selectedModelId };
             }
         }
-        this.preferenceService.set(LANGUAGE_MODEL_ALIASES_PREFERENCE, map, PreferenceScope.User);
+        this.aiConfigurationService.set(LANGUAGE_MODEL_ALIASES_PREFERENCE, map, PreferenceScope.User);
     }
 }

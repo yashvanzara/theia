@@ -19,12 +19,20 @@ import path = require('path');
 import os = require('os');
 import express = require('@theia/core/shared/express');
 import fs = require('@theia/core/shared/fs-extra');
-import { BackendApplicationContribution, FileUri } from '@theia/core/lib/node';
-import { injectable } from '@theia/core/shared/inversify';
+import { BackendApplicationContribution, FileUri, HttpConnectionValidator } from '@theia/core/lib/node';
+import { injectable, inject, named } from '@theia/core/shared/inversify';
 import { HTTP_FILE_UPLOAD_PATH } from '../../common/file-upload';
+import { ILogger, URI } from '@theia/core';
 
 @injectable()
 export class NodeFileUploadService implements BackendApplicationContribution {
+
+    @inject(ILogger) @named('filesystem:NodeFileUploadService')
+    protected readonly logger: ILogger;
+
+    @inject(HttpConnectionValidator)
+    protected readonly connectionValidator: HttpConnectionValidator;
+
     private static readonly UPLOAD_DIR = 'theia_upload';
 
     async configure(app: express.Application): Promise<void> {
@@ -32,10 +40,13 @@ export class NodeFileUploadService implements BackendApplicationContribution {
             this.getTemporaryUploadDest(),
             this.getHttpFileUploadPath()
         ]);
-        console.debug(`HTTP file upload URL path: ${http_path}`);
-        console.debug(`Backend file upload cache path: ${dest}`);
+        this.logger.debug(`HTTP file upload URL path: ${http_path}`);
+        this.logger.debug(`Backend file upload cache path: ${dest}`);
+        // Reject unauthenticated/cross-origin requests before `multer` writes any temp file.
+        const guard: express.RequestHandler = (request, response, next) => this.connectionValidator.validateRequest(request, response, next);
         app.post(
             http_path,
+            guard,
             // `multer` handles `multipart/form-data` containing our file to upload.
             multer({ dest }).single('file'),
             (request, response, next) => this.handleFileUpload(request, response)
@@ -58,7 +69,7 @@ export class NodeFileUploadService implements BackendApplicationContribution {
 
     protected async handleFileUpload(request: express.Request, response: express.Response): Promise<void> {
         const fields = request.body;
-        if (!request.file || typeof fields !== 'object' || typeof fields.uri !== 'string') {
+        if (!request.file || typeof fields !== 'object' || typeof fields.uri !== 'string' || new URI(fields.uri).scheme !== 'file') {
             response.sendStatus(400); // bad request
             return;
         }
@@ -72,7 +83,7 @@ export class NodeFileUploadService implements BackendApplicationContribution {
             }
             response.status(200).send(target); // ok
         } catch (error) {
-            console.error(error);
+            this.logger.error(error);
             if (error.message) {
                 // internal server error with error message as response
                 response.status(500).send(error.message);

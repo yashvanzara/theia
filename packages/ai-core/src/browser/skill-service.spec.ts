@@ -18,15 +18,22 @@ import { enableJSDOM } from '@theia/core/lib/browser/test/jsdom';
 const disableJSDOM = enableJSDOM();
 
 import { FrontendApplicationConfigProvider } from '@theia/core/lib/browser/frontend-application-config-provider';
-FrontendApplicationConfigProvider.set({});
+// Guarded: another spec in the same mocha process may already have set it, and `set` throws on a
+// second call.
+try {
+    FrontendApplicationConfigProvider.get();
+} catch {
+    FrontendApplicationConfigProvider.set({});
+}
 
 import { expect } from 'chai';
 import * as sinon from 'sinon';
-import { parseSkillFile, combineSkillDirectories } from '../common/skill';
+import { parseSkillFile, combineSkillDirectories, Skill, SkillDirectoryEntry } from '../common/skill';
 import { Path } from '@theia/core/lib/common/path';
 import { Disposable, Emitter, ILogger, Logger, URI } from '@theia/core';
+import { Deferred } from '@theia/core/lib/common/promise-util';
 import { FileChangesEvent } from '@theia/filesystem/lib/common/files';
-import { DefaultSkillService } from './skill-service';
+import { DefaultSkillService, SkillDirectoryContribution } from './skill-service';
 
 disableJSDOM();
 
@@ -55,94 +62,127 @@ describe('SkillService', () => {
     });
 
     describe('directory prioritization', () => {
-        it('workspace directory comes first when all directories provided', () => {
+        it('workspace directories come first when all directories provided', () => {
             const result = combineSkillDirectories(
-                '/workspace/.prompts/skills',
+                ['/workspace/.prompts/skills', '/workspace/.agents/skills'],
                 ['/custom/skills1', '/custom/skills2'],
-                '/home/user/.theia/skills'
+                ['/home/user/.theia/skills', '/home/user/.agents/skills']
             );
 
             expect(result).to.deep.equal([
-                '/workspace/.prompts/skills',
-                '/custom/skills1',
-                '/custom/skills2',
-                '/home/user/.theia/skills'
+                { path: '/workspace/.prompts/skills', tier: 'workspace' },
+                { path: '/workspace/.agents/skills', tier: 'workspace' },
+                { path: '/custom/skills1', tier: 'configured' },
+                { path: '/custom/skills2', tier: 'configured' },
+                { path: '/home/user/.theia/skills', tier: 'default' },
+                { path: '/home/user/.agents/skills', tier: 'default' }
             ]);
         });
 
-        it('works without workspace directory', () => {
+        it('preserves the workspace-tier order: .prompts/skills wins over .agents/skills on duplicate skill names', () => {
+            // The `.prompts/skills` directory is intentionally listed first within the workspace tier
+            // because it is the Theia-explicit folder; users opting into it signal stronger intent than
+            // those relying on the generic `.agents/skills` convention.
             const result = combineSkillDirectories(
-                undefined,
-                ['/custom/skills'],
-                '/home/user/.theia/skills'
-            );
-
-            expect(result).to.deep.equal([
-                '/custom/skills',
-                '/home/user/.theia/skills'
-            ]);
-        });
-
-        it('works with only default directory', () => {
-            const result = combineSkillDirectories(
-                undefined,
+                ['/workspace/.prompts/skills', '/workspace/.agents/skills'],
                 [],
-                '/home/user/.theia/skills'
+                []
             );
 
-            expect(result).to.deep.equal(['/home/user/.theia/skills']);
+            expect(result.map(entry => entry.path)).to.deep.equal([
+                '/workspace/.prompts/skills',
+                '/workspace/.agents/skills'
+            ]);
+        });
+
+        it('works without workspace directories', () => {
+            const result = combineSkillDirectories(
+                [],
+                ['/custom/skills'],
+                ['/home/user/.theia/skills']
+            );
+
+            expect(result).to.deep.equal([
+                { path: '/custom/skills', tier: 'configured' },
+                { path: '/home/user/.theia/skills', tier: 'default' }
+            ]);
+        });
+
+        it('works with only default directories', () => {
+            const result = combineSkillDirectories(
+                [],
+                [],
+                ['/home/user/.theia/skills', '/home/user/.agents/skills']
+            );
+
+            expect(result).to.deep.equal([
+                { path: '/home/user/.theia/skills', tier: 'default' },
+                { path: '/home/user/.agents/skills', tier: 'default' }
+            ]);
         });
 
         it('deduplicates workspace directory if also in configured', () => {
             const result = combineSkillDirectories(
-                '/workspace/.prompts/skills',
+                ['/workspace/.prompts/skills'],
                 ['/workspace/.prompts/skills', '/custom/skills'],
-                '/home/user/.theia/skills'
+                ['/home/user/.theia/skills']
             );
 
             expect(result).to.deep.equal([
-                '/workspace/.prompts/skills',
-                '/custom/skills',
-                '/home/user/.theia/skills'
+                { path: '/workspace/.prompts/skills', tier: 'workspace' },
+                { path: '/custom/skills', tier: 'configured' },
+                { path: '/home/user/.theia/skills', tier: 'default' }
             ]);
         });
 
         it('deduplicates default directory if also in configured', () => {
             const result = combineSkillDirectories(
-                '/workspace/.prompts/skills',
+                ['/workspace/.prompts/skills'],
                 ['/home/user/.theia/skills'],
-                '/home/user/.theia/skills'
+                ['/home/user/.theia/skills']
             );
 
             expect(result).to.deep.equal([
-                '/workspace/.prompts/skills',
-                '/home/user/.theia/skills'
+                { path: '/workspace/.prompts/skills', tier: 'workspace' },
+                { path: '/home/user/.theia/skills', tier: 'configured' }
             ]);
         });
 
         it('handles empty configured directories', () => {
             const result = combineSkillDirectories(
-                '/workspace/.prompts/skills',
+                ['/workspace/.prompts/skills'],
                 [],
-                '/home/user/.theia/skills'
+                ['/home/user/.theia/skills']
             );
 
             expect(result).to.deep.equal([
-                '/workspace/.prompts/skills',
-                '/home/user/.theia/skills'
+                { path: '/workspace/.prompts/skills', tier: 'workspace' },
+                { path: '/home/user/.theia/skills', tier: 'default' }
             ]);
         });
 
-        it('handles undefined default directory', () => {
+        it('handles empty default directories', () => {
             const result = combineSkillDirectories(
-                '/workspace/.prompts/skills',
+                ['/workspace/.prompts/skills'],
                 ['/custom/skills'],
-                undefined
+                []
             );
 
             expect(result).to.deep.equal([
-                '/workspace/.prompts/skills',
-                '/custom/skills'
+                { path: '/workspace/.prompts/skills', tier: 'workspace' },
+                { path: '/custom/skills', tier: 'configured' }
+            ]);
+        });
+
+        it('deduplicates duplicate workspace directories', () => {
+            const result = combineSkillDirectories(
+                ['/workspace/.prompts/skills', '/workspace/.prompts/skills'],
+                [],
+                []
+            );
+
+            expect(result).to.deep.equal([
+                { path: '/workspace/.prompts/skills', tier: 'workspace' }
             ]);
         });
     });
@@ -278,6 +318,7 @@ description: Skill with no content
         let fileServiceMock: any;
         let loggerWarnSpy: sinon.SinonStub;
         let loggerInfoSpy: sinon.SinonStub;
+        let loggerDebugSpy: sinon.SinonStub;
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         let envVariablesServerMock: any;
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -288,13 +329,17 @@ description: Skill with no content
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         let preferenceChangedEmitter: Emitter<any>;
 
-        function createService(): DefaultSkillService {
+        function createService(contributions: SkillDirectoryContribution[] = []): DefaultSkillService {
             const service = new DefaultSkillService();
+            (service as unknown as { skillDirectoryContributions: unknown }).skillDirectoryContributions = {
+                getContributions: () => contributions
+            };
             (service as unknown as { preferences: unknown }).preferences = preferencesMock;
             (service as unknown as { fileService: unknown }).fileService = fileServiceMock;
             const loggerMock: ILogger = sinon.createStubInstance(Logger);
             loggerMock.warn = loggerWarnSpy;
             loggerMock.info = loggerInfoSpy;
+            loggerMock.debug = loggerDebugSpy;
             (service as unknown as { logger: unknown }).logger = loggerMock;
             (service as unknown as { envVariablesServer: unknown }).envVariablesServer = envVariablesServerMock;
             (service as unknown as { workspaceService: unknown }).workspaceService = workspaceServiceMock;
@@ -315,6 +360,7 @@ description: Skill with no content
 
             loggerWarnSpy = sinon.stub();
             loggerInfoSpy = sinon.stub();
+            loggerDebugSpy = sinon.stub();
 
             envVariablesServerMock = {
                 getHomeDirUri: sinon.stub().resolves('file:///home/testuser'),
@@ -329,6 +375,7 @@ description: Skill with no content
 
             preferencesMock = {
                 'ai-features.skills.skillDirectories': [],
+                ready: Promise.resolve(),
                 onPreferenceChanged: preferenceChangedEmitter.event
             };
         });
@@ -362,13 +409,17 @@ description: Skill with no content
                 sinon.match({ recursive: false, excludes: [] })
             )).to.be.true;
 
-            // Verify info log about watching parent
-            expect(loggerInfoSpy.calledWith(
+            // Verify debug log about watching parent (demoted from info to keep startup quiet)
+            expect(loggerDebugSpy.calledWith(
                 sinon.match(/Watching parent directory.*for skills folder creation/)
             )).to.be.true;
+            // And the same line must not be emitted at info level any more.
+            expect(loggerInfoSpy.calledWith(
+                sinon.match(/Watching parent directory/)
+            )).to.be.false;
         });
 
-        it('should log warning when parent directory does not exist', async () => {
+        it('should log a debug entry when parent directory does not exist', async () => {
             const service = createService();
 
             // Neither skills directory nor parent exists
@@ -379,10 +430,42 @@ description: Skill with no content
             await workspaceServiceMock.ready;
             await new Promise(resolve => setTimeout(resolve, 10));
 
-            // Verify warning is logged about parent not existing
-            expect(loggerWarnSpy.calledWith(
+            // The absent-default-tree case is expected on fresh machines and is now debug-level only.
+            expect(loggerDebugSpy.calledWith(
                 sinon.match(/Cannot watch skills directory.*parent directory does not exist/)
             )).to.be.true;
+            // It must no longer surface as a startup warning.
+            expect(loggerWarnSpy.calledWith(
+                sinon.match(/Cannot watch skills directory.*parent directory does not exist/)
+            )).to.be.false;
+        });
+
+        it('coalesces concurrent update() calls so a single scan runs at a time', async () => {
+            const service = createService();
+
+            // Default skills directory does not exist, but parent does, so each update logs once.
+            fileServiceMock.exists
+                .withArgs(sinon.match((uri: URI) => uri.path.toString() === '/home/testuser/.theia-ide/skills'))
+                .resolves(false);
+            fileServiceMock.exists
+                .withArgs(sinon.match((uri: URI) => uri.path.toString() === '/home/testuser/.theia-ide'))
+                .resolves(true);
+
+            // Drive two updates in the same tick - the second must be coalesced into a follow-up
+            // re-schedule rather than racing the first and producing duplicated log lines.
+            const update = (service as unknown as { update: () => Promise<void> }).update.bind(service);
+            await Promise.all([update(), update()]);
+            // Give the rescheduled run (debounced via scheduleUpdate) time to fire.
+            await new Promise(resolve => setTimeout(resolve, 80));
+
+            // The watcher must be installed (the underlying scan must have run); the same log line
+            // must have been emitted at most once per scan, never twice from interleaved scans.
+            const matchingDebugCalls = loggerDebugSpy.getCalls().filter(call =>
+                /Watching parent directory.*for skills folder creation/.test(String(call.args[0]))
+            );
+            // Two scans (initial + rescheduled) are allowed, but never more, and never zero.
+            expect(matchingDebugCalls.length).to.be.greaterThan(0);
+            expect(matchingDebugCalls.length).to.be.lessThan(3);
         });
 
         it('should log warning for non-existent configured directories', async () => {
@@ -412,6 +495,41 @@ description: Skill with no content
             // Verify warning is logged for non-existent configured directory
             expect(loggerWarnSpy.calledWith(
                 sinon.match(/Configured skill directory.*does not exist/)
+            )).to.be.true;
+        });
+
+        it('should scan configured directories that only become known once the preferences are ready', async () => {
+            // The preference proxy serves defaults until its `ready` promise resolves, so a scan started before
+            // that point misses the configured directories.
+            const preferencesReady = new Deferred<void>();
+            preferencesMock.ready = preferencesReady.promise;
+
+            // Default skills directory exists and is empty, so the configured directory is the only source of warnings.
+            fileServiceMock.exists
+                .withArgs(sinon.match((uri: URI) => uri.path.toString() === '/home/testuser/.theia-ide/skills'))
+                .resolves(true);
+            fileServiceMock.resolve
+                .withArgs(sinon.match((uri: URI) => uri.path.toString() === '/home/testuser/.theia-ide/skills'))
+                .resolves({ children: [] });
+            fileServiceMock.exists
+                .withArgs(sinon.match((uri: URI) => uri.path.toString() === '/custom/configured/skills'))
+                .resolves(false);
+
+            const service = createService();
+            (service as unknown as { init: () => void }).init();
+            await workspaceServiceMock.ready;
+            await new Promise(resolve => setTimeout(resolve, 10));
+
+            // Nothing may be scanned yet, the preference value is still the default one.
+            expect(fileServiceMock.exists.called).to.be.false;
+
+            (preferencesMock as Record<string, unknown>)['ai-features.skills.skillDirectories'] = ['/custom/configured/skills'];
+            preferencesReady.resolve();
+            await new Promise(resolve => setTimeout(resolve, 10));
+
+            // The scan picked up the configured directory instead of the default preference value.
+            expect(loggerWarnSpy.calledWith(
+                sinon.match(/Configured skill directory '\/custom\/configured\/skills' does not exist/)
             )).to.be.true;
         });
 
@@ -476,6 +594,266 @@ Test skill content`
             const skills = service.getSkills();
             expect(skills).to.have.length(1);
             expect(skills[0].name).to.equal('test-skill');
+        });
+
+        it('prefers a workspace `.prompts/skills` skill over a same-named `.agents/skills` skill in the same root', async () => {
+            const service = createService();
+
+            workspaceServiceMock.tryGetRoots.returns([
+                { resource: URI.fromFilePath('/workspace') }
+            ]);
+
+            // Stub default skill directories as non-existent to keep focus on workspace behavior.
+            fileServiceMock.exists
+                .withArgs(sinon.match((uri: URI) => uri.path.toString() === '/home/testuser/.theia-ide/skills'))
+                .resolves(false);
+            fileServiceMock.exists
+                .withArgs(sinon.match((uri: URI) => uri.path.toString() === '/home/testuser/.theia-ide'))
+                .resolves(false);
+            fileServiceMock.exists
+                .withArgs(sinon.match((uri: URI) => uri.path.toString() === '/home/testuser/.agents/skills'))
+                .resolves(false);
+            fileServiceMock.exists
+                .withArgs(sinon.match((uri: URI) => uri.path.toString() === '/home/testuser/.agents'))
+                .resolves(false);
+
+            // Both workspace skill directories exist and contain a `dup-skill` directory.
+            const promptsSkillDir = '/workspace/.prompts/skills';
+            const agentsSkillDir = '/workspace/.agents/skills';
+            fileServiceMock.exists
+                .withArgs(sinon.match((uri: URI) => uri.path.toString() === promptsSkillDir))
+                .resolves(true);
+            fileServiceMock.exists
+                .withArgs(sinon.match((uri: URI) => uri.path.toString() === agentsSkillDir))
+                .resolves(true);
+            fileServiceMock.resolve
+                .withArgs(sinon.match((uri: URI) => uri.path.toString() === promptsSkillDir))
+                .resolves({
+                    children: [{
+                        isDirectory: true,
+                        name: 'dup-skill',
+                        resource: URI.fromFilePath(`${promptsSkillDir}/dup-skill`)
+                    }]
+                });
+            fileServiceMock.resolve
+                .withArgs(sinon.match((uri: URI) => uri.path.toString() === agentsSkillDir))
+                .resolves({
+                    children: [{
+                        isDirectory: true,
+                        name: 'dup-skill',
+                        resource: URI.fromFilePath(`${agentsSkillDir}/dup-skill`)
+                    }]
+                });
+
+            // Each tier provides its own SKILL.md so we can distinguish them by location.
+            fileServiceMock.exists
+                .withArgs(sinon.match((uri: URI) => uri.path.toString() === `${promptsSkillDir}/dup-skill/SKILL.md`))
+                .resolves(true);
+            fileServiceMock.exists
+                .withArgs(sinon.match((uri: URI) => uri.path.toString() === `${agentsSkillDir}/dup-skill/SKILL.md`))
+                .resolves(true);
+            fileServiceMock.read
+                .withArgs(sinon.match((uri: URI) => uri.path.toString() === `${promptsSkillDir}/dup-skill/SKILL.md`))
+                .resolves({
+                    value: '---\nname: dup-skill\ndescription: from prompts\n---\nFrom prompts'
+                });
+            fileServiceMock.read
+                .withArgs(sinon.match((uri: URI) => uri.path.toString() === `${agentsSkillDir}/dup-skill/SKILL.md`))
+                .resolves({
+                    value: '---\nname: dup-skill\ndescription: from agents\n---\nFrom agents'
+                });
+
+            (service as unknown as { init: () => void }).init();
+            await workspaceServiceMock.ready;
+            await new Promise(resolve => setTimeout(resolve, 10));
+
+            const skill = service.getSkill('dup-skill');
+            expect(skill, 'dup-skill should be discovered').to.not.be.undefined;
+            expect(skill!.description).to.equal('from prompts');
+            expect(skill!.location).to.equal(new Path(`${promptsSkillDir}/dup-skill/SKILL.md`).fsPath());
+            // The second occurrence is reported (not silently swallowed) via a warning.
+            expect(loggerWarnSpy.calledWith(
+                sinon.match(/Duplicate skill found.*dup-skill/)
+            )).to.be.true;
+        });
+
+        describe('contributed skill directories', () => {
+
+            const bigQueryQualifier = 'bigquery-data-analytics';
+            const athenaQualifier = 'athena-analytics';
+
+            /** A contribution returning a fixed set of roots. */
+            function contributing(...entries: SkillDirectoryEntry[]): SkillDirectoryContribution {
+                return { getSkillDirectories: () => entries };
+            }
+
+            /**
+             * Stubs `directory` as an existing skills root holding one skill directory per given name,
+             * each with a valid `SKILL.md` whose description names the root it came from.
+             */
+            function stubSkillsRoot(directory: string, ...skillNames: string[]): void {
+                fileServiceMock.exists
+                    .withArgs(sinon.match((uri: URI) => uri.path.toString() === directory))
+                    .resolves(true);
+                fileServiceMock.resolve
+                    .withArgs(sinon.match((uri: URI) => uri.path.toString() === directory))
+                    .resolves({
+                        children: skillNames.map(name => ({
+                            isDirectory: true,
+                            name,
+                            resource: URI.fromFilePath(`${directory}/${name}`)
+                        }))
+                    });
+                for (const name of skillNames) {
+                    const skillFile = `${directory}/${name}/SKILL.md`;
+                    fileServiceMock.exists
+                        .withArgs(sinon.match((uri: URI) => uri.path.toString() === skillFile))
+                        .resolves(true);
+                    fileServiceMock.read
+                        .withArgs(sinon.match((uri: URI) => uri.path.toString() === skillFile))
+                        .resolves({ value: `---\nname: ${name}\ndescription: from ${directory}\n---\nBody of ${name}` });
+                }
+            }
+
+            async function initialize(service: DefaultSkillService): Promise<void> {
+                (service as unknown as { init: () => void }).init();
+                await workspaceServiceMock.ready;
+                await new Promise(resolve => setTimeout(resolve, 10));
+            }
+
+            it('qualifies the names of skills found under an owned contributed root', async () => {
+                const pluginSkills = '/home/testuser/.agents/plugins/bigquery/skills';
+                stubSkillsRoot(pluginSkills, 'query-builder');
+
+                const service = createService([contributing({ path: pluginSkills, tier: 'plugin', qualifier: bigQueryQualifier })]);
+                await initialize(service);
+
+                const skills = service.getSkills();
+                expect(skills).to.have.length(1);
+                expect(skills[0].name).to.equal('query-builder');
+                expect(skills[0].qualifiedName).to.equal('bigquery-data-analytics:query-builder');
+                expect(Skill.qualifierOf(skills[0])).to.equal('bigquery-data-analytics');
+            });
+
+            it('leaves the qualified name of a skill from a built-in root equal to its plain name', async () => {
+                stubSkillsRoot('/home/testuser/.theia-ide/skills', 'code-review');
+
+                const service = createService();
+                await initialize(service);
+
+                const skills = service.getSkills();
+                expect(skills).to.have.length(1);
+                expect(skills[0].qualifiedName).to.equal('code-review');
+                expect(Skill.qualifierOf(skills[0])).to.be.undefined;
+            });
+
+            it('resolves an owned skill by its qualified name and by its plain name', async () => {
+                const pluginSkills = '/home/testuser/.agents/plugins/bigquery/skills';
+                stubSkillsRoot(pluginSkills, 'query-builder');
+
+                const service = createService([contributing({ path: pluginSkills, tier: 'plugin', qualifier: bigQueryQualifier })]);
+                await initialize(service);
+
+                expect(service.getSkill('bigquery-data-analytics:query-builder')?.name).to.equal('query-builder');
+                // The plain name keeps working, so every reference written before the skill was owned
+                // still resolves.
+                expect(service.getSkill('query-builder')?.qualifiedName).to.equal('bigquery-data-analytics:query-builder');
+            });
+
+            it('loads a skill of the same name from two different plugins and keeps both addressable', async () => {
+                const bigQuerySkills = '/home/testuser/.agents/plugins/bigquery/skills';
+                const athenaSkills = '/home/testuser/.agents/plugins/athena/skills';
+                stubSkillsRoot(bigQuerySkills, 'query-builder');
+                stubSkillsRoot(athenaSkills, 'query-builder');
+
+                const service = createService([contributing(
+                    { path: bigQuerySkills, tier: 'plugin', qualifier: bigQueryQualifier },
+                    { path: athenaSkills, tier: 'plugin', qualifier: athenaQualifier }
+                )]);
+                await initialize(service);
+
+                expect(service.getSkills()).to.have.length(2);
+                expect(service.getSkill('bigquery-data-analytics:query-builder')?.description).to.equal(`from ${bigQuerySkills}`);
+                expect(service.getSkill('athena-analytics:query-builder')?.description).to.equal(`from ${athenaSkills}`);
+                // Neither is dropped as a duplicate, because they no longer share a name.
+                expect(loggerWarnSpy.calledWith(sinon.match(/Duplicate skill found/))).to.be.false;
+            });
+
+            it('resolves an ambiguous plain name to undefined rather than guessing one of the candidates', async () => {
+                const bigQuerySkills = '/home/testuser/.agents/plugins/bigquery/skills';
+                const athenaSkills = '/home/testuser/.agents/plugins/athena/skills';
+                stubSkillsRoot(bigQuerySkills, 'query-builder');
+                stubSkillsRoot(athenaSkills, 'query-builder');
+
+                const service = createService([contributing(
+                    { path: bigQuerySkills, tier: 'plugin', qualifier: bigQueryQualifier },
+                    { path: athenaSkills, tier: 'plugin', qualifier: athenaQualifier }
+                )]);
+                await initialize(service);
+
+                expect(service.getSkill('query-builder')).to.be.undefined;
+            });
+
+            it('keeps loading the remaining roots when one contribution fails', async () => {
+                const pluginSkills = '/home/testuser/.agents/plugins/bigquery/skills';
+                stubSkillsRoot(pluginSkills, 'query-builder');
+                stubSkillsRoot('/home/testuser/.theia-ide/skills', 'code-review');
+
+                const failing: SkillDirectoryContribution = {
+                    getSkillDirectories: () => { throw new Error('cannot enumerate plugins'); }
+                };
+                const service = createService([
+                    failing,
+                    contributing({ path: pluginSkills, tier: 'plugin', qualifier: bigQueryQualifier })
+                ]);
+                await initialize(service);
+
+                expect(service.getSkills().map(skill => skill.qualifiedName).sort())
+                    .to.deep.equal(['bigquery-data-analytics:query-builder', 'code-review']);
+            });
+
+            it('watches the parent of a contributed root that does not exist yet instead of warning about it', async () => {
+                const pluginRoot = '/home/testuser/.agents/plugins/bigquery';
+                fileServiceMock.exists
+                    .withArgs(sinon.match((uri: URI) => uri.path.toString() === `${pluginRoot}/skills`))
+                    .resolves(false);
+                fileServiceMock.exists
+                    .withArgs(sinon.match((uri: URI) => uri.path.toString() === pluginRoot))
+                    .resolves(true);
+
+                const service = createService([contributing({ path: `${pluginRoot}/skills`, tier: 'plugin', qualifier: bigQueryQualifier })]);
+                await initialize(service);
+
+                expect(fileServiceMock.watch.calledWith(
+                    sinon.match((uri: URI) => uri.path.toString() === pluginRoot),
+                    sinon.match({ recursive: false, excludes: [] })
+                )).to.be.true;
+                // A plugin without skills is not a misconfiguration, so it must not warn like a
+                // non-existent configured directory does.
+                expect(loggerWarnSpy.calledWith(sinon.match(/does not exist/))).to.be.false;
+            });
+
+            it('rescans when a contribution reports that its set of roots changed', async () => {
+                const pluginSkills = '/home/testuser/.agents/plugins/bigquery/skills';
+                const onDidChangeEmitter = new Emitter<void>();
+                let entries: SkillDirectoryEntry[] = [];
+                const contribution: SkillDirectoryContribution = {
+                    getSkillDirectories: () => entries,
+                    onDidChange: onDidChangeEmitter.event
+                };
+
+                const service = createService([contribution]);
+                await initialize(service);
+                expect(service.getSkills()).to.have.length(0);
+
+                stubSkillsRoot(pluginSkills, 'query-builder');
+                entries = [{ path: pluginSkills, tier: 'plugin', qualifier: bigQueryQualifier }];
+                onDidChangeEmitter.fire();
+                await new Promise(resolve => setTimeout(resolve, 100));
+
+                expect(service.getSkills().map(skill => skill.qualifiedName)).to.deep.equal(['bigquery-data-analytics:query-builder']);
+                onDidChangeEmitter.dispose();
+            });
         });
     });
 });

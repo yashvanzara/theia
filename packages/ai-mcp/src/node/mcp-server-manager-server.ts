@@ -14,9 +14,10 @@
 // SPDX-License-Identifier: EPL-2.0 OR GPL-2.0-only WITH Classpath-exception-2.0
 // *****************************************************************************
 
-import { inject, injectable } from '@theia/core/shared/inversify';
+import { inject, injectable, named } from '@theia/core/shared/inversify';
 import { MCPServerDescription, MCPServerManager } from '../common';
 import { cleanServerDescription, MCPServerDescriptionRCP, MCPServerManagerServer, MCPServerManagerServerClient } from '../common/mcp-protocol';
+import { ILogger } from '@theia/core';
 
 @injectable()
 export class MCPServerManagerServerImpl implements MCPServerManagerServer {
@@ -24,10 +25,26 @@ export class MCPServerManagerServerImpl implements MCPServerManagerServer {
     @inject(MCPServerManager)
     protected readonly mcpServerManager: MCPServerManager;
 
-    protected client: MCPServerManagerServerClient;
+    @inject(ILogger) @named('ai-mcp:MCPServerManagerServerImpl')
+    protected readonly logger: ILogger;
+
+    protected client: MCPServerManagerServerClient | undefined;
 
     setClient(client: MCPServerManagerServerClient): void {
+        if (this.client && this.client !== client) {
+            throw new Error('MCP server manager server is scoped to a single frontend connection.');
+        }
         this.client = client;
+    }
+
+    disconnectClient(client: MCPServerManagerServerClient): void {
+        if (this.client !== undefined && this.client !== client) {
+            this.logger.warn('MCP server manager server received disconnectClient for a non-current client; ignoring (one-client-per-container invariant violation).');
+            return;
+        }
+        if (this.client === client) {
+            this.client = undefined;
+        }
     }
 
     async addOrUpdateServer(descriptionRCP: MCPServerDescriptionRCP): Promise<void> {
@@ -35,15 +52,17 @@ export class MCPServerManagerServerImpl implements MCPServerManagerServer {
         if (descriptionRCP.resolveId) {
             description.resolve = async (desc: MCPServerDescription) => {
                 if (this.client) {
+                    // Discard `resolve` explicitly: it's a function and must not cross the RPC boundary.
+                    const { resolve: _resolve, ...descWithoutResolve } = desc;
                     const descRCP: MCPServerDescriptionRCP = {
-                        ...desc,
+                        ...descWithoutResolve,
                         resolveId: descriptionRCP.resolveId
                     };
                     return this.client.resolveServerDescription(descRCP);
                 }
-                return desc; // Fallback if no client is set
+                return desc;
             };
-        };
-        this.mcpServerManager.addOrUpdateServer(description);
+        }
+        await this.mcpServerManager.addOrUpdateServer(description);
     }
 }

@@ -14,7 +14,7 @@
 // SPDX-License-Identifier: EPL-2.0 OR GPL-2.0-only WITH Classpath-exception-2.0
 // *****************************************************************************
 
-import { inject, injectable } from '@theia/core/shared/inversify';
+import { inject, injectable, named } from '@theia/core/shared/inversify';
 import { ILogger, MaybePromise, nls, URI } from '@theia/core';
 import {
     AIVariable, AIVariableContext, AIVariableContribution, AIVariableResolutionRequest,
@@ -22,7 +22,7 @@ import {
 } from '../common/variable-service';
 import { FileService } from '@theia/filesystem/lib/browser/file-service';
 import { SkillService } from './skill-service';
-import { parseSkillFile } from '../common/skill';
+import { parseSkillFile, Skill } from '../common/skill';
 
 export const SKILLS_VARIABLE: AIVariable = {
     id: 'skills',
@@ -39,6 +39,7 @@ export const SKILL_VARIABLE: AIVariable = {
 };
 
 export interface SkillSummary {
+    /** The name the model has to write to address the skill, i.e. {@link Skill.qualifiedName}. */
     name: string;
     description: string;
     location: string;
@@ -54,7 +55,7 @@ export class SkillsVariableContribution implements AIVariableContribution, AIVar
     @inject(SkillService)
     protected readonly skillService: SkillService;
 
-    @inject(ILogger)
+    @inject(ILogger) @named('ai-core:SkillsVariableContribution')
     protected readonly logger: ILogger;
 
     @inject(FileService)
@@ -80,21 +81,30 @@ export class SkillsVariableContribution implements AIVariableContribution, AIVar
 
         // Handle plural skills variable
         if (request.variable.name === SKILLS_VARIABLE.name) {
-            const skills = this.skillService.getSkills();
-            this.logger.debug(`SkillsVariableContribution: Resolving skills variable, found ${skills.length} skills`);
-
-            const skillSummaries: SkillSummary[] = skills.map(skill => ({
-                name: skill.name,
-                description: skill.description,
-                location: skill.location
-            }));
-
-            const xmlValue = this.generateSkillsXML(skillSummaries);
-            this.logger.debug(`SkillsVariableContribution: Generated XML:\n${xmlValue}`);
-
-            return { variable: SKILLS_VARIABLE, skills: skillSummaries, value: xmlValue };
+            return this.resolveSkillsVariable(this.skillService.getSkills().map(skill => this.toSkillSummary(skill)), SKILLS_VARIABLE);
         }
         return undefined;
+    }
+
+    /** Named by {@link Skill.qualifiedName}: that is what the model has to write to load it again. */
+    toSkillSummary(skill: Skill): SkillSummary {
+        return {
+            name: skill.qualifiedName,
+            description: skill.description,
+            location: skill.location
+        };
+    }
+
+    /**
+     * Resolves skills into a ResolvedSkillsVariable with XML format.
+     */
+    resolveSkillsVariable(includedSkills: SkillSummary[], variable: AIVariable): ResolvedSkillsVariable {
+        this.logger.debug(`SkillsVariableContribution: Resolving skills variable, found ${includedSkills.length} skills`);
+
+        const xmlValue = this.generateSkillsXML(includedSkills);
+        this.logger.debug(`SkillsVariableContribution: Generated XML:\n${xmlValue}`);
+
+        return { variable, skills: includedSkills, value: xmlValue };
     }
 
     protected async resolveSingleSkill(request: AIVariableResolutionRequest): Promise<ResolvedAIVariable | undefined> {
@@ -127,8 +137,9 @@ export class SkillsVariableContribution implements AIVariableContribution, AIVar
     /**
      * Generates XML representation of skills.
      * XML format follows the Agent Skills spec for structured skill representation.
+     * This method is public to allow reuse by GenericCapabilitiesVariableContribution.
      */
-    protected generateSkillsXML(skills: SkillSummary[]): string {
+    generateSkillsXML(skills: SkillSummary[]): string {
         if (skills.length === 0) {
             return '<available_skills>\n</available_skills>';
         }

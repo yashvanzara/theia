@@ -19,14 +19,14 @@ import { ResponseNode } from '@theia/ai-chat-ui/lib/browser/chat-tree-view';
 import { ChatResponseContent, ToolCallChatResponseContent } from '@theia/ai-chat/lib/common';
 import { codicon, LabelProvider } from '@theia/core/lib/browser';
 import { URI } from '@theia/core/lib/common/uri';
-import { inject, injectable } from '@theia/core/shared/inversify';
+import { inject, injectable, named } from '@theia/core/shared/inversify';
 import * as React from '@theia/core/shared/react';
 import { ReactNode } from '@theia/core/shared/react';
 import { EditorManager } from '@theia/editor/lib/browser';
 import { WorkspaceService } from '@theia/workspace/lib/browser';
 import { ClaudeCodeToolCallChatResponseContent } from '../claude-code-tool-call-content';
 import { CollapsibleToolRenderer } from './collapsible-tool-renderer';
-import { nls } from '@theia/core';
+import { nls, ILogger } from '@theia/core';
 
 interface LSToolInput {
     path: string;
@@ -45,6 +45,9 @@ export class LSToolRenderer implements ChatResponsePartRenderer<ToolCallChatResp
     @inject(EditorManager)
     protected readonly editorManager: EditorManager;
 
+    @inject(ILogger) @named('ai-claude-code:LSToolRenderer')
+    protected readonly logger: ILogger;
+
     canHandle(response: ChatResponseContent): number {
         if (ClaudeCodeToolCallChatResponseContent.is(response) && response.name === 'LS') {
             return 15; // Higher than default ToolCallPartRenderer (10)
@@ -60,9 +63,10 @@ export class LSToolRenderer implements ChatResponsePartRenderer<ToolCallChatResp
                 workspaceService={this.workspaceService}
                 labelProvider={this.labelProvider}
                 editorManager={this.editorManager}
+                logger={this.logger}
             />;
         } catch (error) {
-            console.warn('Failed to parse LS tool input:', error);
+            this.logger.warn('Failed to parse LS tool input:', error);
             return <div className="claude-code-tool error">{nls.localize('theia/ai/claude-code/failedToParseLSToolData', 'Failed to parse LS tool data')}</div>;
         }
     }
@@ -73,7 +77,8 @@ const LSToolComponent: React.FC<{
     workspaceService: WorkspaceService;
     labelProvider: LabelProvider;
     editorManager: EditorManager;
-}> = ({ input, workspaceService, labelProvider, editorManager }) => {
+    logger: ILogger;
+}> = ({ input, workspaceService, labelProvider, editorManager, logger }) => {
     const getDirectoryName = (dirPath: string): string => dirPath.split('/').pop() || dirPath;
     const getWorkspaceRelativePath = async (dirPath: string): Promise<string> => {
         try {
@@ -91,7 +96,7 @@ const LSToolComponent: React.FC<{
             // Note: This might need to be adjusted based on how directories are opened in Theia
             await editorManager.open(uri);
         } catch (error) {
-            console.error('Failed to open directory:', error);
+            logger.error('Failed to open directory:', error);
         }
     };
 
@@ -126,7 +131,7 @@ const LSToolComponent: React.FC<{
     const expandedContent = (
         <div className="claude-code-tool details">
             <div className="claude-code-tool detail-row">
-                <span className="claude-code-tool detail-label">{nls.localize('theia/ai/claude-code/directory', 'Directory')}</span>
+                <span className="claude-code-tool detail-label">{nls.localizeByDefault('Directory')}</span>
                 <code className="claude-code-tool detail-value">{input.path}</code>
             </div>
             {input.ignore && input.ignore.length > 0 && (

@@ -15,12 +15,12 @@
 // *****************************************************************************
 
 import { AIVariableContext, getJsonOfText, getTextOfResponse, LanguageModel, LanguageModelMessage, LanguageModelRequirement, LanguageModelResponse } from '@theia/ai-core';
-import { inject, injectable } from '@theia/core/shared/inversify';
+import { inject, injectable, named } from '@theia/core/shared/inversify';
 import { ChatAgentService } from '@theia/ai-chat/lib/common/chat-agent-service';
 import { ChatToolRequest } from '@theia/ai-chat/lib/common/chat-tool-request-service';
 import { AbstractStreamParsingChatAgent, SystemMessageDescription } from '@theia/ai-chat/lib/common/chat-agents';
 import { MutableChatRequestModel, InformationalChatResponseContentImpl } from '@theia/ai-chat/lib/common/chat-model';
-import { generateUuid, nls, PreferenceService } from '@theia/core';
+import { generateUuid, ILogger, nls, PreferenceService } from '@theia/core';
 import { orchestratorTemplate } from './orchestrator-prompt-template';
 import { PREFERENCE_NAME_ORCHESTRATOR_EXCLUSION_LIST } from './ai-ide-preferences';
 
@@ -29,11 +29,14 @@ const OrchestratorRequestIdKey = 'orchestratorRequestIdKey';
 
 @injectable()
 export class OrchestratorChatAgent extends AbstractStreamParsingChatAgent {
+    @inject(ILogger) @named('ai-ide:OrchestratorChatAgent')
+    protected override readonly logger: ILogger;
+
     id: string = OrchestratorChatAgentId;
     name = OrchestratorChatAgentId;
     languageModelRequirements: LanguageModelRequirement[] = [{
         purpose: 'agent-selection',
-        identifier: 'default/universal',
+        identifier: 'default/fast',
     }];
     protected defaultLanguageModelPurpose: string = 'agent-selection';
 
@@ -41,7 +44,7 @@ export class OrchestratorChatAgent extends AbstractStreamParsingChatAgent {
     override description = nls.localize('theia/ai/chat/orchestrator/description',
         'This agent analyzes the user request against the description of all available chat agents and selects the best fitting agent to answer the request \
     (by using AI).The user\'s request will be directly delegated to the selected agent without further confirmation.');
-    override iconClass: string = 'codicon codicon-symbol-boolean';
+    override iconClass: string = 'codicon codicon-milestone';
     override agentSpecificVariables = [{
         name: 'availableChatAgents',
         description: nls.localize('theia/ai/chat/orchestrator/vars/availableChatAgents/description',
@@ -106,12 +109,14 @@ export class OrchestratorChatAgent extends AbstractStreamParsingChatAgent {
         request: MutableChatRequestModel,
         messages: LanguageModelMessage[],
         toolRequests: ChatToolRequest[],
+        deferredToolIds: string[] | undefined,
         languageModel: LanguageModel,
         promptVariantId?: string,
         isPromptVariantCustomized?: boolean
     ): Promise<LanguageModelResponse> {
         const agentSettings = this.getLlmSettings();
-        const settings = { ...agentSettings, ...request.session.settings };
+        const { commonSettings, providerSettings } = this.getSessionSettings(request);
+        const settings = { ...agentSettings, ...providerSettings };
         const tools = toolRequests.length > 0 ? toolRequests : undefined;
         const subRequestId = request.getDataByKey<string>(OrchestratorRequestIdKey) ?? request.id;
         request.removeData(OrchestratorRequestIdKey);
@@ -120,7 +125,9 @@ export class OrchestratorChatAgent extends AbstractStreamParsingChatAgent {
             {
                 messages,
                 tools,
+                deferredToolIds,
                 settings,
+                reasoning: commonSettings?.reasoning,
                 agentId: this.id,
                 sessionId: request.session.id,
                 requestId: request.id,

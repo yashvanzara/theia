@@ -110,7 +110,7 @@ async function theiaCli(): Promise<void> {
     const projectPath = process.cwd();
     // Create a sub `yargs` parser to read `app-target` without
     // affecting the global `yargs` instance used by the CLI.
-    const { appTarget } = defineCommonOptions(yargsFactory()).help(false).parse();
+    const { appTarget } = await defineCommonOptions(yargsFactory()).help(false).parse();
     const manager = new ApplicationPackageManager({ projectPath, appTarget });
     const localizationManager = new LocalizationManager();
     const { target } = manager.pck;
@@ -153,26 +153,28 @@ async function theiaCli(): Promise<void> {
         })
         .command<{
             mode: 'development' | 'production',
-            webpackHelp: boolean
+            bundlerHelp: boolean
             splitFrontend?: boolean
-            webpackArgs?: (string | number)[]
+            bundlerArgs?: (string | number)[]
         }>({
-            command: 'build [webpack-args...]',
-            describe: `Generate and bundle the ${target} frontend using webpack`,
+            command: 'build [bundler-args...]',
+            describe: `Generate and bundle the ${target} frontend using esbuild`,
             builder: cli => ApplicationPackageManager.defineGeneratorOptions(cli)
-                .option('webpack-help' as 'webpackHelp', {
+                .option('bundler-help' as 'bundlerHelp', {
                     boolean: true,
-                    description: 'Display Webpack\'s help',
-                    default: false
+                    description: 'Display the bundler\'s help',
+                    default: false,
+                    // Deprecated alias, kept so that scripts written for the webpack bundler keep working.
+                    alias: 'webpack-help'
                 }),
-            handler: async ({ mode, splitFrontend, webpackHelp, webpackArgs = [] }) => {
+            handler: async ({ mode, splitFrontend, bundlerHelp, bundlerArgs = [] }) => {
                 await manager.build(
-                    webpackHelp
+                    bundlerHelp
                         ? ['--help']
                         : [
-                            // Forward the `mode` argument to Webpack too:
+                            // Forward the `mode` argument to the bundler too:
                             '--mode', mode,
-                            ...toStringArray(webpackArgs)
+                            ...toStringArray(bundlerArgs)
                         ],
                     { mode, splitFrontend }
                 );
@@ -432,13 +434,16 @@ async function theiaCli(): Promise<void> {
                 if (!client) {
                     client = new OVSXHttpClient(apiUrl, requestService, rateLimiter);
                 }
+                // This handler must not call `process.exit`: on Windows that aborts the
+                // process, because Node calls `uv_async_send` on an already-closing handle
+                // while undici tears down the connections used to fetch the plugins
+                // (nodejs/node#56645). Let the event loop drain instead.
                 try {
                     await downloadPlugins(client, rateLimiter, requestService, options);
                 } catch (error) {
                     console.error(error);
-                    process.exit(1);
+                    process.exitCode = 1;
                 }
-                process.exit(0);
             },
         })
         .command<{
@@ -446,7 +451,8 @@ async function theiaCli(): Promise<void> {
             deeplKey: string,
             file: string,
             languages: string[],
-            sourceLanguage?: string
+            sourceLanguage?: string,
+            forceRetranslate?: string
         }>({
             command: 'nls-localize [languages...]',
             describe: 'Localize json files using the DeepL API',
@@ -469,15 +475,21 @@ async function theiaCli(): Promise<void> {
                 'source-language': {
                     alias: 's',
                     describe: 'The source language of the translation file'
+                },
+                'force-retranslate': {
+                    describe: 'Comma-separated list of localization keys to force re-translate even if they already exist',
+                    type: 'string' as const
                 }
             },
-            handler: async ({ freeApi, deeplKey, file, sourceLanguage, languages = [] }) => {
+            handler: async ({ freeApi, deeplKey, file, sourceLanguage, languages = [], forceRetranslate }) => {
+                const forceKeys = forceRetranslate ? new Set(forceRetranslate.split(',').map((k: string) => k.trim()).filter(Boolean)) : undefined;
                 const success = await localizationManager.localize({
                     sourceFile: file,
                     freeApi: freeApi ?? true,
                     authKey: deeplKey,
                     targetLanguages: languages,
-                    sourceLanguage
+                    sourceLanguage,
+                    forceKeys
                 });
                 if (!success) {
                     process.exit(1);
@@ -611,7 +623,7 @@ async function theiaCli(): Promise<void> {
                         defaultViewport: null, // view port can take available space instead of 800x600 default
                         devtools: testInspect,
                         headless: testInspect ? false : 'shell',
-                        executablePath: executablePath(),
+                        executablePath: await executablePath(),
                         protocolTimeout: 600000,
                         timeout: 60000
                     },

@@ -8,7 +8,7 @@
 // SPDX-License-Identifier: EPL-2.0 OR GPL-2.0-only WITH Classpath-exception-2.0
 // *****************************************************************************
 
-import { injectable, inject } from '@theia/core/shared/inversify';
+import { injectable, inject, named } from '@theia/core/shared/inversify';
 import { CommandRegistry, PreferenceService, DisposableCollection } from '@theia/core/lib/common';
 import { TerminalWidget } from '@theia/terminal/lib/browser/base/terminal-widget';
 import { TerminalFrontendContribution, TerminalCommands } from '@theia/terminal/lib/browser/terminal-frontend-contribution';
@@ -16,6 +16,7 @@ import { ApplicationShell, WidgetManager, FrontendApplicationContribution, Front
 import { TerminalManagerWidget } from './terminal-manager-widget';
 import { TerminalManagerFrontendViewContribution } from './terminal-manager-frontend-view-contribution';
 import { TerminalManagerPreferences } from './terminal-manager-preferences';
+import { ILogger } from '@theia/core';
 /**
  * Re-registers terminal commands (e.g. new terminal) to execute them via the terminal manager
  * instead of creating new, separate terminals.
@@ -43,6 +44,9 @@ export class TerminalManagerFrontendContribution implements FrontendApplicationC
     @inject(CommandRegistry)
     protected readonly commandRegistry: CommandRegistry;
 
+    @inject(ILogger) @named('terminal-manager:TerminalManagerFrontendContribution')
+    protected readonly logger: ILogger;
+
     protected commandHandlerDisposables = new DisposableCollection();
 
     onStart(app: FrontendApplication): void {
@@ -53,12 +57,20 @@ export class TerminalManagerFrontendContribution implements FrontendApplicationC
                 }
             });
             if (this.preferences.get('terminal.grouping.mode') !== 'tree') {
-                console.debug('Terminal tab style is not tree. Use separate terminal views.');
+                this.logger.debug('Terminal tab style is not tree. Use separate terminal views.');
                 return;
             }
-            console.debug('Terminal tab style is tree. Override command handlers accordingly.');
+            this.logger.debug('Terminal tab style is tree. Override command handlers accordingly.');
             this.registerHandlers();
         });
+    }
+
+    async initializeLayout(): Promise<void> {
+        await this.preferenceService.ready;
+        if (this.preferences.get('terminal.grouping.mode') !== 'tree') {
+            return;
+        }
+        await this.terminalManagerViewContribution.openView({ activate: false });
     }
 
     protected async handleTabsDisplayChange(newValue: string): Promise<void> {
@@ -89,7 +101,8 @@ export class TerminalManagerFrontendContribution implements FrontendApplicationC
 
         // Before terminal manager attachment to precede creation of default widget.
         for (const terminal of bottomTerminals) {
-            managerWidget.addTerminalPage(terminal);
+            const specialConfig = managerWidget.treeWidget.model.getSpecialPageConfig(terminal.kind);
+            managerWidget.addTerminalPage(terminal, specialConfig?.pageId);
             terminal.show(); // Clear hidden flag that may have been set by dock panel on removal.
         }
 

@@ -14,7 +14,7 @@
 // SPDX-License-Identifier: EPL-2.0 OR GPL-2.0-only WITH Classpath-exception-2.0
 // *****************************************************************************
 
-export * from './agent-completion-notification-service';
+export * from './agent-notification-service';
 export * from './os-notification-service';
 export * from './window-blink-service';
 export * from './ai-activation-service';
@@ -23,9 +23,11 @@ export * from './ai-core-frontend-application-contribution';
 export * from './ai-core-frontend-module';
 export * from '../common/ai-core-preferences';
 export * from './ai-settings-service';
+export * from './ai-configuration-service-impl';
 export * from './ai-view-contribution';
 export * from './frontend-language-model-registry';
 export * from './frontend-language-model-alias-registry';
+export * from './hide-ai-preferences-contribution';
 export * from './frontend-variable-service';
 export * from './prompttemplate-contribution';
 export * from './theia-variable-contribution';
@@ -33,6 +35,11 @@ export * from './open-editors-variable-contribution';
 export * from './skills-variable-contribution';
 export * from './skill-service';
 export * from './skill-prompt-coordinator';
+export * from './agent-plugin-ui-bridge';
+export * from './skill-registry-ui-bridge';
 export * from './frontend-variable-service';
 export * from './ai-core-command-contribution';
 export * from '../common/language-model-service';
+export * from './generic-capabilities-variable-contribution';
+export * from './generic-capabilities-prompt-fragment-contribution';
+export * from './prompt-variable-contribution';

@@ -103,6 +103,17 @@ export namespace TerminalManagerCommands {
 }
 
 export const TERMINAL_MANAGER_TREE_CONTEXT_MENU = ['terminal-manager-tree-context-menu'];
+
+/**
+ * Configuration for special pages in the terminal manager tree.
+ * Each entry maps a terminal `kind` to its page ID, display label, and icon.
+ */
+export interface SpecialPageConfig {
+    readonly pageId: TerminalManagerTreeTypes.PageId;
+    readonly label: string;
+    readonly icon: string;
+}
+
 export namespace TerminalManagerTreeTypes {
     export type TerminalKey = `terminal-${string}`;
     export const generateTerminalKey = (widget: TerminalWidgetImpl): TerminalKey => {

@@ -17,15 +17,19 @@
 import { ChatResponseContent } from '@theia/ai-chat';
 import { ChatResponsePartRenderer } from '@theia/ai-chat-ui/lib/browser/chat-response-part-renderer';
 import { codicon } from '@theia/core/lib/browser';
-import { injectable } from '@theia/core/shared/inversify';
+import { injectable, inject, named } from '@theia/core/shared/inversify';
 import * as React from '@theia/core/shared/react';
 import { ReactNode } from '@theia/core/shared/react';
 import type { CommandExecutionItem } from '@openai/codex-sdk';
 import { CodexToolCallChatResponseContent } from '../codex-tool-call-content';
-import { nls } from '@theia/core';
+import { nls, ILogger } from '@theia/core';
 
 @injectable()
 export class CommandExecutionRenderer implements ChatResponsePartRenderer<CodexToolCallChatResponseContent> {
+
+    @inject(ILogger) @named('ai-codex:CommandExecutionRenderer')
+    protected readonly logger: ILogger;
+
     canHandle(response: ChatResponseContent): number {
         return response.kind === 'toolCall' &&
             (response as CodexToolCallChatResponseContent).name === 'command_execution'
@@ -42,14 +46,14 @@ export class CommandExecutionRenderer implements ChatResponsePartRenderer<CodexT
                     ? JSON.parse(content.result)
                     : content.result as CommandExecutionItem;
             } catch (error) {
-                console.error('Failed to parse command execution result:', error);
+                this.logger.error('Failed to parse command execution result:', error);
                 return undefined;
             }
         }
 
         if (!item) {
             const args = content.arguments ? JSON.parse(content.arguments) : {};
-            return <CommandExecutionInProgressComponent command={args.command || 'executing...'} />;
+            return <CommandExecutionInProgressComponent command={args.command || nls.localizeByDefault('Executing')} />;
         }
 
         return <CommandExecutionComponent item={item} />;
@@ -65,7 +69,7 @@ const CommandExecutionInProgressComponent: React.FC<{
             <span className="codex-tool-name">{nls.localizeByDefault('Terminal')}</span>
             <code className="codex-command-line">{command}</code>
             <span className="codex-exit-code in-progress">
-                {nls.localize('theia/ai/codex/running', 'Running...')}
+                {nls.localizeByDefault('Running')}...
             </span>
         </div>
     </div>

@@ -22,6 +22,7 @@ import { ClipboardService } from '@theia/core/lib/browser/clipboard-service';
 import { WindowService } from '@theia/core/lib/browser/window/window-service';
 import { CommandService, nls } from '@theia/core';
 import { CopilotAuthService, DeviceCodeResponse } from '../common/copilot-auth-service';
+import { CopilotAuthDialogMessages } from './copilot-auth-dialog-messages';
 
 const OPEN_AI_CONFIG_VIEW_COMMAND = 'aiConfiguration:open';
 
@@ -47,6 +48,9 @@ export class CopilotAuthDialog extends ReactDialog<boolean> {
     @inject(CommandService)
     protected readonly commandService: CommandService;
 
+    @inject(CopilotAuthDialogMessages)
+    protected readonly messages: CopilotAuthDialogMessages;
+
     protected state: AuthDialogState = 'loading';
     protected deviceCodeResponse?: DeviceCodeResponse;
     protected errorMessage?: string;
@@ -62,7 +66,7 @@ export class CopilotAuthDialog extends ReactDialog<boolean> {
 
     @postConstruct()
     protected init(): void {
-        this.titleNode.textContent = nls.localize('theia/ai/copilot/auth/title', 'Sign in to GitHub Copilot');
+        this.titleNode.textContent = this.props.title;
         this.appendAcceptButton(nls.localize('theia/ai/copilot/auth/authorize', 'I have authorized'));
         this.appendCloseButton(nls.localizeByDefault('Cancel'));
     }
@@ -85,7 +89,12 @@ export class CopilotAuthDialog extends ReactDialog<boolean> {
 
     override async open(): Promise<boolean | undefined> {
         this.initiateFlow();
-        return super.open();
+        const result = await super.open();
+        if (this.state !== 'success') {
+            // Leave no Copilot CLI process behind when the dialog is dismissed or retried.
+            await this.authService.cancelSignIn();
+        }
+        return result;
     }
 
     override update(): void {
@@ -98,7 +107,7 @@ export class CopilotAuthDialog extends ReactDialog<boolean> {
             this.state = 'loading';
             this.update();
 
-            this.deviceCodeResponse = await this.authService.initiateDeviceFlow(this.props.enterpriseUrl);
+            this.deviceCodeResponse = await this.authService.startSignIn(this.props.enterpriseUrl);
             this.state = 'waiting';
             this.update();
         } catch (error) {
@@ -117,11 +126,7 @@ export class CopilotAuthDialog extends ReactDialog<boolean> {
         this.update();
 
         try {
-            const success = await this.authService.pollForToken(
-                this.deviceCodeResponse.device_code,
-                this.deviceCodeResponse.interval,
-                this.props.enterpriseUrl
-            );
+            const success = await this.authService.waitForSignIn();
 
             if (success) {
                 this.state = 'success';
@@ -145,7 +150,10 @@ export class CopilotAuthDialog extends ReactDialog<boolean> {
 
     protected override isValid(_value: boolean, _mode: DialogError): DialogError {
         if (this.state === 'error') {
-            return this.errorMessage ?? 'An error occurred';
+            // The error is shown in the dialog body by renderError, where it can wrap. Returning only a
+            // failed result keeps the accept button disabled without repeating the (often long) message
+            // next to it, where it does not fit.
+            return { result: false, message: '' };
         }
         return '';
     }
@@ -209,8 +217,7 @@ export class CopilotAuthDialog extends ReactDialog<boolean> {
         return (
             <div className="theia-copilot-auth-waiting">
                 <p className="theia-copilot-auth-instructions">
-                    {nls.localize('theia/ai/copilot/auth/instructions',
-                        'To authorize Theia to use GitHub Copilot, visit the URL below and enter the code:')}
+                    {this.messages.instructions}
                 </p>
 
                 <div className="theia-copilot-auth-code-section">
@@ -247,9 +254,7 @@ export class CopilotAuthDialog extends ReactDialog<boolean> {
 
                 <div className="theia-copilot-auth-privacy">
                     <p className="theia-copilot-auth-privacy-text">
-                        {nls.localize('theia/ai/copilot/auth/privacy',
-                            'Theia is an open-source project. We only request access to your GitHub username ' +
-                            'to connect to GitHub Copilot services — no other data is accessed or stored.')}
+                        {this.messages.privacyNotice}
                     </p>
                     <p className="theia-copilot-auth-tos-text">
                         {nls.localize('theia/ai/copilot/auth/tos',

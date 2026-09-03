@@ -19,7 +19,31 @@ import { inject, injectable, named, postConstruct } from '@theia/core/shared/inv
 
 export type MessageActor = 'user' | 'ai' | 'system';
 
-export type LanguageModelMessage = TextMessage | ThinkingMessage | ToolUseMessage | ToolResultMessage | ImageMessage;
+/** Provider-agnostic reasoning level; each provider maps this to its native API. */
+export type ReasoningLevel = 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'auto';
+
+export interface ReasoningSettings {
+    level: ReasoningLevel;
+}
+
+/**
+ * Shape of a model's reasoning parameter in its native API.
+ * - `'effort'`: discrete effort enum.
+ * - `'budget'`: numeric token budget.
+ */
+export type ReasoningApi = 'effort' | 'budget';
+
+/**
+ * Declares a model's reasoning capabilities. When unset, the chat UI hides the
+ * reasoning selector and providers ignore the `reasoning` field on requests.
+ */
+export interface ReasoningSupport {
+    readonly supportedLevels: ReadonlyArray<ReasoningLevel>;
+    readonly defaultLevel?: ReasoningLevel;
+}
+
+export type LanguageModelMessage =
+    TextMessage | ThinkingMessage | ToolUseMessage | ToolResultMessage | ServerToolUseMessage | ImageMessage | CompactionMessage;
 export namespace LanguageModelMessage {
 
     export function isTextMessage(obj: LanguageModelMessage): obj is TextMessage {
@@ -34,8 +58,14 @@ export namespace LanguageModelMessage {
     export function isToolResultMessage(obj: LanguageModelMessage): obj is ToolResultMessage {
         return obj.type === 'tool_result';
     }
+    export function isServerToolUseMessage(obj: LanguageModelMessage): obj is ServerToolUseMessage {
+        return obj.type === 'server_tool_use';
+    }
     export function isImageMessage(obj: LanguageModelMessage): obj is ImageMessage {
         return obj.type === 'image';
+    }
+    export function isCompactionMessage(obj: LanguageModelMessage): obj is CompactionMessage {
+        return obj.type === 'compaction';
     }
 }
 export interface TextMessage {
@@ -67,6 +97,23 @@ export interface ToolUseMessage {
     name: string;
     data?: Record<string, string>;
 }
+
+/**
+ * Replay message for a tool the provider executed on its own infrastructure (a server tool).
+ * Unlike {@link ToolUseMessage}/{@link ToolResultMessage}, the invocation and its result are
+ * carried together because the client never executes the tool. Providers reconstruct their
+ * native request blocks from this message on subsequent turns.
+ */
+export interface ServerToolUseMessage {
+    actor: 'ai';
+    type: 'server_tool_use';
+    id: string;
+    name: string;
+    input: unknown;
+    result?: ToolCallResult;
+    /** Provider-specific metadata needed to faithfully reconstruct the server tool blocks on replay. */
+    data?: Record<string, string>;
+}
 export type ImageMimeType = 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp' | 'image/bmp' | 'image/svg+xml' | string & {};
 export interface UrlImageContent { url: string };
 export interface Base64ImageContent {
@@ -84,6 +131,17 @@ export interface ImageMessage {
     image: ImageContent;
 }
 
+export interface CompactionMessage {
+    actor: 'ai';
+    type: 'compaction';
+    /** Originating provider tag; a backend replays the payload only when this matches its own provider. */
+    provider: string;
+    /** Opaque provider payload to replay. */
+    data: unknown;
+    /** Human-readable summary, when the provider exposes one. */
+    summary?: string;
+}
+
 export const isLanguageModelRequestMessage = (obj: unknown): obj is LanguageModelMessage =>
     !!(obj && typeof obj === 'object' &&
         'type' in obj &&
@@ -92,6 +150,11 @@ export const isLanguageModelRequestMessage = (obj: unknown): obj is LanguageMode
         'query' in obj &&
         typeof (obj as { query: unknown }).query === 'string'
     );
+
+export interface AutoActionResult {
+    action: 'allow' | 'deny';
+    reason?: string;
+}
 
 export interface ToolRequestParameterProperty {
     type?: | 'string' | 'number' | 'integer' | 'boolean' | 'object' | 'array' | 'null';
@@ -145,6 +208,15 @@ export interface ToolRequest<TContext extends ToolInvocationContext = ToolInvoca
      */
     getArgumentsShortLabel?(args: string): { label: string; hasMore: boolean } | undefined;
 
+    /**
+     * Optional hook to determine automatic action for this tool invocation.
+     * @param argString - The JSON argument string passed to the tool
+     * @returns
+     *   - { action: 'allow' } - Auto-approve without confirmation
+     *   - { action: 'deny', reason } - Auto-deny without confirmation
+     *   - undefined - Show confirmation UI (default behavior)
+     */
+    checkAutoAction?: (argString: string) => AutoActionResult | undefined;
 }
 
 /**
@@ -247,12 +319,90 @@ export namespace ToolRequest {
             (!('required' in obj) || (Array.isArray(obj.required) && obj.required.every(prop => typeof prop === 'string')));
     }
 }
+// Anthropic requires at least 50,000 tokens, so use one conservative minimum for all compaction settings.
+export const SERVER_SIDE_COMPACTION_TOKEN_THRESHOLD_MINIMUM = 50_000;
+
+/**
+ * Per-session/per-request server-side compaction settings, carried verbatim from the chat
+ * session's common settings to the request. Kept as an object so further parameters can be
+ * added later.
+ */
+export interface CompactionSettings {
+    /** Explicit enablement for this session; when set it wins over the model's default. `undefined` means "no explicit choice". */
+    enabled?: boolean;
+    /** Input-token threshold for this session; when set it wins over the model's default. `undefined` preserves the provider default. */
+    tokenThreshold?: number;
+}
+
+/** Per-provider override for server-side compaction; combined with the global preference by {@link resolveCompactionDefault}. */
+export type ServerSideCompactionSetting = 'default' | 'enabled' | 'disabled';
+
+/**
+ * Resolves a model's default server-side compaction enablement from the global preference and
+ * the per-provider override. `'enabled'`/`'disabled'` force the result; `'default'` defers to
+ * the global preference. Intended to be called where the preferences are read (the provider's
+ * frontend contribution) and stored on the model.
+ */
+export function resolveCompactionDefault(globalEnabled: boolean, perProviderOverride: ServerSideCompactionSetting): boolean {
+    if (perProviderOverride === 'enabled') {
+        return true;
+    }
+    if (perProviderOverride === 'disabled') {
+        return false;
+    }
+    return globalEnabled;
+}
+
+export function resolveCompactionTokenThresholdDefault(
+    globalThreshold: number | undefined,
+    perProviderThreshold: number | undefined
+): number | undefined {
+    return perProviderThreshold ?? globalThreshold;
+}
+
+export function resolveCompactionTokenThreshold(
+    thresholdByDefault: number | undefined,
+    compaction: CompactionSettings | undefined
+): number | undefined {
+    return compaction?.tokenThreshold ?? thresholdByDefault;
+}
+
+/**
+ * Resolves whether server-side compaction is effective for a request: the model must support it
+ * (capability), then an explicit per-session setting wins, otherwise the model's resolved default applies.
+ */
+export function resolveServerSideCompaction(
+    capability: boolean | undefined,
+    enabledByDefault: boolean,
+    compaction: CompactionSettings | undefined
+): boolean {
+    if (!capability) {
+        return false;
+    }
+    return compaction?.enabled ?? enabledByDefault;
+}
+
 export interface LanguageModelRequest {
     messages: LanguageModelMessage[],
     tools?: ToolRequest[];
+    /**
+     * Ids of tools whose definitions should be deferred and discovered
+     * on-demand via the provider's built-in tool search mechanism.
+     * Providers that do not support deferred loading should ignore this field.
+     */
+    deferredToolIds?: string[];
+    /**
+     * Ids of the provider's server tools (see {@link ServerToolDescriptor}) that are enabled for this
+     * request. Each provider translates the enabled ids into its native server tool configuration.
+     */
+    serverTools?: string[];
     response_format?: { type: 'text' } | { type: 'json_object' } | ResponseFormatJsonSchema;
     settings?: { [key: string]: unknown };
-    clientSettings?: { keepToolCalls: boolean; keepThinking: boolean }
+    clientSettings?: { keepToolCalls: boolean; keepThinking: boolean };
+    /** Provider-agnostic reasoning configuration; providers translate it to their native API. */
+    reasoning?: ReasoningSettings;
+    /** Provider-agnostic server-side compaction settings, copied verbatim from the chat session. Resolved against the model's capability and default in the backend. */
+    compaction?: CompactionSettings;
 }
 export interface ResponseFormatJsonSchema {
     type: 'json_schema';
@@ -303,18 +453,23 @@ export interface UserRequest extends LanguageModelRequest {
 
 export interface LanguageModelTextResponse {
     text: string;
+    usage?: UsageResponsePart;
 }
 export const isLanguageModelTextResponse = (obj: unknown): obj is LanguageModelTextResponse =>
     !!(obj && typeof obj === 'object' && 'text' in obj && typeof (obj as { text: unknown }).text === 'string');
 
-export type LanguageModelStreamResponsePart = TextResponsePart | ToolCallResponsePart | ThinkingResponsePart | UsageResponsePart;
+export type LanguageModelStreamResponsePart =
+    TextResponsePart | ToolCallResponsePart | ServerToolCallResponsePart | ThinkingResponsePart | UsageResponsePart | CompactionResponsePart;
 
 export const isLanguageModelStreamResponsePart = (part: unknown): part is LanguageModelStreamResponsePart =>
-    isUsageResponsePart(part) || isTextResponsePart(part) || isThinkingResponsePart(part) || isToolCallResponsePart(part);
+    isUsageResponsePart(part) || isTextResponsePart(part) || isThinkingResponsePart(part) ||
+    isToolCallResponsePart(part) || isServerToolCallResponsePart(part) || isCompactionResponsePart(part);
 
 export interface UsageResponsePart {
     input_tokens: number;
     output_tokens: number;
+    cache_creation_input_tokens?: number;
+    cache_read_input_tokens?: number;
 }
 export const isUsageResponsePart = (part: unknown): part is UsageResponsePart =>
     !!(part && typeof part === 'object' &&
@@ -332,6 +487,26 @@ export interface ToolCallResponsePart {
 export const isToolCallResponsePart = (part: unknown): part is ToolCallResponsePart =>
     !!(part && typeof part === 'object' && 'tool_calls' in part && Array.isArray(part.tool_calls));
 
+/**
+ * A server tool invocation (and its result) that the provider executed on its own infrastructure.
+ * The shape mirrors {@link ToolCall} but flattens name/arguments since there is no client handler.
+ */
+export interface ServerToolCall {
+    id: string;
+    name: string;
+    arguments?: string;
+    result?: ToolCallResult;
+    finished?: boolean;
+    /** Provider-specific metadata needed to faithfully reconstruct the server tool blocks on replay. */
+    data?: Record<string, string>;
+}
+
+export interface ServerToolCallResponsePart {
+    server_tool_calls: ServerToolCall[];
+}
+export const isServerToolCallResponsePart = (part: unknown): part is ServerToolCallResponsePart =>
+    !!(part && typeof part === 'object' && 'server_tool_calls' in part && Array.isArray((part as ServerToolCallResponsePart).server_tool_calls));
+
 export interface ThinkingResponsePart {
     thought: string;
     signature: string;
@@ -339,15 +514,40 @@ export interface ThinkingResponsePart {
 export const isThinkingResponsePart = (part: unknown): part is ThinkingResponsePart =>
     !!(part && typeof part === 'object' && 'thought' in part && typeof part.thought === 'string');
 
+export interface CompactionResponsePart {
+    compaction: {
+        /** Originating provider tag, e.g. 'anthropic' or 'openai-responses'. */
+        provider: string;
+        /** Opaque provider payload (Anthropic compaction block(s) / OpenAI compaction item). Never interpreted outside the originating backend. */
+        data: unknown;
+        /** Human-readable summary, when the provider exposes one. */
+        summary?: string;
+    };
+}
+export const isCompactionResponsePart = (part: unknown): part is CompactionResponsePart =>
+    !!(part && typeof part === 'object' && 'compaction' in part &&
+        typeof (part as CompactionResponsePart).compaction === 'object' &&
+        (part as CompactionResponsePart).compaction &&
+        'provider' in (part as CompactionResponsePart).compaction &&
+        typeof (part as CompactionResponsePart).compaction.provider === 'string');
+
 export interface ToolCallTextResult { type: 'text', text: string; };
 export interface ToolCallImageResult extends Base64ImageContent { type: 'image' };
 export interface ToolCallAudioResult { type: 'audio', data: string; mimeType: string };
+export interface ToolCallHtmlAppResult { type: 'html'; html: string; title?: string };
 export type ToolCallErrorKind = 'tool-not-available';
 export interface ToolCallErrorResult { type: 'error', data: string; errorKind?: ToolCallErrorKind; };
-export type ToolCallContentResult = ToolCallTextResult | ToolCallImageResult | ToolCallAudioResult | ToolCallErrorResult;
+export type ToolCallContentResult = ToolCallTextResult | ToolCallImageResult | ToolCallAudioResult | ToolCallHtmlAppResult | ToolCallErrorResult;
 export interface ToolCallContent {
     content: ToolCallContentResult[];
 }
+
+export const isToolCallHtmlAppResult = (item: unknown): item is ToolCallHtmlAppResult =>
+    !!(item &&
+        typeof item === 'object' &&
+        'type' in item && (item as ToolCallHtmlAppResult).type === 'html' &&
+        'html' in item &&
+        typeof (item as ToolCallHtmlAppResult).html === 'string');
 
 export const isToolCallContent = (result: unknown): result is ToolCallContent =>
     !!(result && typeof result === 'object' && 'content' in result && Array.isArray((result as ToolCallContent).content));
@@ -367,6 +567,26 @@ export const hasToolNotAvailableError = (result: ToolCallResult): boolean =>
 export const createToolCallError = (message: string, errorKind?: ToolCallErrorKind): ToolCallContent => ({
     content: [errorKind ? { type: 'error', data: message, errorKind } : { type: 'error', data: message }]
 });
+
+/**
+ * Serializes a {@link ToolCallResult} to a string suitable for sending back to the model.
+ *
+ * HTML app results are replaced with a compact placeholder so that large bundled HTML
+ * (e.g. Plotly charts) does not blow the model's context window. The full HTML is still
+ * available in the structured result for rendering in the UI (e.g. via McpAppFrame).
+ */
+export function formatToolCallContentForModel(result: ToolCallResult): string {
+    if (isToolCallContent(result)) {
+        return result.content.map(c => {
+            if (c.type === 'text') { return c.text; }
+            if (c.type === 'html') { return `[interactive app displayed to the user${c.title ? ': ' + c.title : ''}]`; }
+            if (c.type === 'error') { return c.data; }
+            return JSON.stringify(c);
+        }).join('\n');
+    }
+    if (typeof result === 'string') { return result; }
+    return JSON.stringify(result);
+}
 
 export type ToolCallResult = undefined | object | string | ToolCallContent;
 export interface ToolCall {
@@ -394,6 +614,7 @@ export const isLanguageModelStreamResponse = (obj: unknown): obj is LanguageMode
 export interface LanguageModelParsedResponse {
     parsed: unknown;
     content: string;
+    usage?: UsageResponsePart;
 }
 export const isLanguageModelParsedResponse = (obj: unknown): obj is LanguageModelParsedResponse =>
     !!(obj && typeof obj === 'object' && 'parsed' in obj && 'content' in obj);
@@ -407,6 +628,19 @@ export type LanguageModelResponse = LanguageModelTextResponse | LanguageModelStr
 export const LanguageModelProvider = Symbol('LanguageModelProvider');
 export type LanguageModelProvider = () => Promise<LanguageModel[]>;
 
+/**
+ * Describes a server tool a provider offers (e.g. Anthropic `web_search`, Gemini `url_context`).
+ * Server tools are executed by the provider's own infrastructure, not by Theia. Each provider
+ * package declares the descriptors it supports and attaches them to its models so that the chat
+ * UI can offer them for selection. The `id` is the stable identifier used in
+ * {@link LanguageModelRequest.serverTools}.
+ */
+export interface ServerToolDescriptor {
+    id: string;
+    name: string;
+    description?: string;
+}
+
 // See also VS Code `ILanguageModelChatMetadata`
 export interface LanguageModelMetaData {
     readonly id: string;
@@ -417,6 +651,14 @@ export interface LanguageModelMetaData {
     readonly maxInputTokens?: number;
     readonly maxOutputTokens?: number;
     readonly status: LanguageModelStatus;
+    readonly reasoningSupport?: ReasoningSupport;
+    /**
+     * Server tools this model offers, declared code-level by the provider package.
+     * **Note:** If you provide these, you must also provide `vendor` because server tools are vendor-specific.
+     */
+    readonly serverTools?: ServerToolDescriptor[];
+    /** Whether this model supports provider-native server-side compaction (capability, distinct from whether it is activated). */
+    readonly serverSideCompactionSupport?: boolean;
 }
 
 export namespace LanguageModelMetaData {
@@ -489,8 +731,10 @@ export interface FrontendLanguageModelRegistry extends LanguageModelRegistry {
 
 @injectable()
 export class DefaultLanguageModelRegistryImpl implements LanguageModelRegistry {
-    @inject(ILogger)
-    protected logger: ILogger;
+
+    @inject(ILogger) @named('ai-core:DefaultLanguageModelRegistryImpl')
+    protected readonly logger: ILogger;
+
     @inject(ContributionProvider) @named(LanguageModelProvider)
     protected readonly languageModelContributions: ContributionProvider<LanguageModelProvider>;
 
@@ -521,7 +765,7 @@ export class DefaultLanguageModelRegistryImpl implements LanguageModelRegistry {
     addLanguageModels(models: LanguageModel[]): void {
         models.forEach(model => {
             if (this.languageModels.find(lm => lm.id === model.id)) {
-                console.warn(`Tried to add already existing language model with id ${model.id}. The new model will be ignored.`);
+                this.logger.warn(`Tried to add already existing language model with id ${model.id}. The new model will be ignored.`);
                 return;
             }
             this.languageModels.push(model);
@@ -531,7 +775,9 @@ export class DefaultLanguageModelRegistryImpl implements LanguageModelRegistry {
 
     async getLanguageModels(): Promise<LanguageModel[]> {
         await this.initialized;
-        return this.languageModels;
+        // Return a fresh array (not the internal, mutated-in-place list) so consumers relying on
+        // reference equality - e.g. React memoization in the chat model selector - detect changes.
+        return [...this.languageModels];
     }
 
     async getLanguageModel(id: string): Promise<LanguageModel | undefined> {
@@ -546,7 +792,7 @@ export class DefaultLanguageModelRegistryImpl implements LanguageModelRegistry {
                 this.languageModels.splice(index, 1);
                 this.changeEmitter.fire({ models: this.languageModels });
             } else {
-                console.warn(`Language model with id ${id} was requested to be removed, however it does not exist`);
+                this.logger.warn(`Language model with id ${id} was requested to be removed, however it does not exist`);
             }
         });
     }

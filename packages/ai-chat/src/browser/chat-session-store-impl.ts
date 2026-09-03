@@ -51,7 +51,7 @@ export class ChatSessionStoreImpl implements ChatSessionStore {
     @inject(StorageService)
     protected readonly storageService: StorageService;
 
-    @inject(ILogger) @named('ChatSessionStore')
+    @inject(ILogger) @named('ai-chat:ChatSessionStoreImpl')
     protected readonly logger: ILogger;
 
     @inject(PreferenceService)
@@ -95,9 +95,14 @@ export class ChatSessionStoreImpl implements ChatSessionStore {
             }
             this.logger.debug('Starting to store sessions', { totalSessions: sessions.length, storageRoot: root.toString() });
 
-            // Normalize to SessionWithTitle and filter empty sessions
+            // Normalize to SessionWithTitle and filter empty sessions.
+            // Use the lastInteraction timestamp when available so that the
+            // displayed "time ago" reflects the last user activity, not the
+            // last auto-save.
             const nonEmptySessions = sessions
-                .map(s => this.isChatModelWithMetadata(s) ? { ...s, saveDate: Date.now() } : { model: s, saveDate: Date.now() })
+                .map(s => this.isChatModelWithMetadata(s)
+                    ? { ...s, saveDate: s.lastInteraction ?? Date.now() }
+                    : { model: s, saveDate: Date.now() })
                 .filter(s => !s.model.isEmpty());
             this.logger.debug('Filtered empty sessions', { nonEmptySessions: nonEmptySessions.length });
 
@@ -111,6 +116,8 @@ export class ChatSessionStoreImpl implements ChatSessionStore {
                     title: session.title,
                     pinnedAgentId: session.pinnedAgentId,
                     saveDate: session.saveDate,
+                    rootSessionId: session.rootSessionId,
+                    parentSessionId: session.parentSessionId,
                     model: modelData
                 };
                 this.logger.debug('Writing session to file', {

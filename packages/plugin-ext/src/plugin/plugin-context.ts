@@ -140,6 +140,7 @@ import {
     FileSystemError,
     CommentThreadState,
     CommentThreadCollapsibleState,
+    QuickInputButtonLocation,
     QuickInputButtons,
     QuickPickItemKind,
     CommentMode,
@@ -256,7 +257,7 @@ import { DocumentsExtImpl } from './documents';
 import { TextEditorCursorStyle } from '../common/editor-options';
 import { PreferenceRegistryExtImpl } from './preference-registry';
 import { OutputChannelRegistryExtImpl } from './output-channel-registry';
-import { TerminalServiceExtImpl, TerminalExtImpl } from './terminal-ext';
+import { TerminalServiceExtImpl } from './terminal-ext';
 import { LanguagesExtImpl } from './languages';
 import { fromDocumentSelector, pluginToPluginInfo, fromGlobPattern } from './type-converters';
 import { DialogsExtImpl } from './dialogs';
@@ -296,6 +297,7 @@ import { TestingExtImpl } from './tests';
 import { UriExtImpl } from './uri-ext';
 import { PluginLogger } from './logger';
 import { LmExtImpl } from './lm-ext';
+import { LanguageModelToolsExtImpl } from './lm-tool-ext';
 
 export function createAPIObject<T extends Object>(rawObject: T): T {
     return new Proxy(rawObject, {
@@ -347,7 +349,7 @@ export function createAPIFactory(
     const connectionExt = rpc.set(MAIN_RPC_CONTEXT.CONNECTION_EXT, new ConnectionImpl(rpc.getProxy(PLUGIN_RPC_CONTEXT.CONNECTION_MAIN)));
     const fileSystemExt = rpc.set(MAIN_RPC_CONTEXT.FILE_SYSTEM_EXT, new FileSystemExtImpl(rpc));
     const languagesExt = rpc.set(MAIN_RPC_CONTEXT.LANGUAGES_EXT, new LanguagesExtImpl(rpc, documents, commandRegistry, fileSystemExt));
-    const extHostFileSystemEvent = rpc.set(MAIN_RPC_CONTEXT.ExtHostFileSystemEventService, new ExtHostFileSystemEventService(rpc, editorsAndDocumentsExt));
+    const extHostFileSystemEvent = rpc.set(MAIN_RPC_CONTEXT.ExtHostFileSystemEventService, new ExtHostFileSystemEventService(rpc, editorsAndDocumentsExt, workspaceExt));
     const scmExt = rpc.set(MAIN_RPC_CONTEXT.SCM_EXT, new ScmExtImpl(rpc, commandRegistry));
     const decorationsExt = rpc.set(MAIN_RPC_CONTEXT.DECORATIONS_EXT, new DecorationsExtImpl(rpc));
     const labelServiceExt = rpc.set(MAIN_RPC_CONTEXT.LABEL_SERVICE_EXT, new LabelServiceExtImpl(rpc));
@@ -361,6 +363,7 @@ export function createAPIFactory(
     const testingExt = rpc.set(MAIN_RPC_CONTEXT.TESTING_EXT, new TestingExtImpl(rpc, commandRegistry));
     const uriExt = rpc.set(MAIN_RPC_CONTEXT.URI_EXT, new UriExtImpl(rpc));
     const lmExt = rpc.set(MAIN_RPC_CONTEXT.MCP_SERVER_DEFINITION_REGISTRY_EXT, new LmExtImpl(rpc));
+    const lmToolExt = rpc.set(MAIN_RPC_CONTEXT.LM_TOOLS_EXT, new LanguageModelToolsExtImpl(rpc));
     rpc.set(MAIN_RPC_CONTEXT.DEBUG_EXT, debugExt);
 
     const commandLogger = new PluginLogger(rpc, 'commands-plugin');
@@ -461,7 +464,7 @@ export function createAPIFactory(
         const showErrorMessage = messageRegistryExt.showMessage.bind(messageRegistryExt, MainMessageType.Error);
         const window: typeof theia.window = {
 
-            get activeTerminal(): TerminalExtImpl | undefined {
+            get activeTerminal(): theia.Terminal | undefined {
                 return terminalExt.activeTerminal;
             },
             get activeTextEditor(): TextEditorExt | undefined {
@@ -470,7 +473,7 @@ export function createAPIFactory(
             get visibleTextEditors(): theia.TextEditor[] {
                 return editors.getVisibleTextEditors();
             },
-            get terminals(): TerminalExtImpl[] {
+            get terminals(): theia.Terminal[] {
                 return terminalExt.terminals;
             },
             onDidChangeActiveTerminal,
@@ -632,7 +635,7 @@ export function createAPIFactory(
             createTerminal(nameOrOptions: theia.TerminalOptions | theia.ExtensionTerminalOptions | theia.ExtensionTerminalOptions | (string | undefined),
                 shellPath?: string,
                 shellArgs?: string[] | string): theia.Terminal {
-                return createAPIObject(terminalExt.createTerminal(plugin, nameOrOptions, shellPath, shellArgs));
+                return terminalExt.createTerminal(plugin, nameOrOptions, shellPath, shellArgs, createAPIObject);
             },
             onDidChangeTerminalState,
             onDidCloseTerminal,
@@ -929,6 +932,7 @@ export function createAPIFactory(
             get appHost(): string { return envExt.appHost; },
             get language(): string { return envExt.language; },
             get isNewAppInstall(): boolean { return envExt.isNewAppInstall; },
+            get isAppPortable(): boolean { return envExt.isAppPortable; },
             get isTelemetryEnabled(): boolean { return telemetryExt.isTelemetryEnabled; },
             get onDidChangeTelemetryEnabled(): theia.Event<boolean> {
                 return telemetryExt.onDidChangeTelemetryEnabled;
@@ -1059,12 +1063,8 @@ export function createAPIFactory(
             registerDocumentHighlightProvider(selector: theia.DocumentSelector, provider: theia.DocumentHighlightProvider): theia.Disposable {
                 return languagesExt.registerDocumentHighlightProvider(selector, provider, pluginToPluginInfo(plugin));
             },
-            /**
-             * @stubbed
-             * @monaco-uplift: wait until API is available in Monaco (1.85.0+)
-             */
             registerMultiDocumentHighlightProvider(selector: theia.DocumentSelector, provider: theia.MultiDocumentHighlightProvider): theia.Disposable {
-                return Disposable.NULL;
+                return languagesExt.registerMultiDocumentHighlightProvider(selector, provider, pluginToPluginInfo(plugin));
             },
             registerWorkspaceSymbolProvider(provider: theia.WorkspaceSymbolProvider): theia.Disposable {
                 return languagesExt.registerWorkspaceSymbolProvider(provider, pluginToPluginInfo(plugin));
@@ -1284,8 +1284,8 @@ export function createAPIFactory(
                     throw new Error('Input box not found!');
                 }
             },
-            createSourceControl(id: string, label: string, rootUri?: URI): theia.SourceControl {
-                return createAPIObject(scmExt.createSourceControl(plugin, id, label, rootUri));
+            createSourceControl(id: string, label: string, rootUri?: URI, iconPath?: theia.IconPath, isHidden?: boolean, parent?: theia.SourceControl): theia.SourceControl {
+                return scmExt.createSourceControl(plugin, id, label, rootUri, iconPath, isHidden, parent);
             }
         };
 
@@ -1372,6 +1372,9 @@ export function createAPIFactory(
         const mcpContributions = plugin.rawModel.contributes && plugin.rawModel.contributes.mcpServerDefinitionProviders || [];
         lmExt.registerMcpContributions(mcpContributions);
 
+        const toolContributions = plugin.rawModel.contributes && plugin.rawModel.contributes.languageModelTools || [];
+        lmToolExt.registerToolContributions(toolContributions);
+
         const lm: typeof theia.lm = {
             /** @stubbed LanguageModelChat */
             selectChatModels(selector?: theia.LanguageModelChatSelector): Thenable<theia.LanguageModelChat[]> {
@@ -1379,16 +1382,15 @@ export function createAPIFactory(
             },
             /** @stubbed LanguageModelChat */
             onDidChangeChatModels: (listener, thisArgs?, disposables?) => Event.None(listener, thisArgs, disposables),
-            /** @stubbed LanguageModelTool */
             invokeTool(name: string, options: theia.LanguageModelToolInvocationOptions<object>, token?: CancellationToken): Thenable<theia.LanguageModelToolResult> {
-                return Promise.resolve({ content: [] });
+                return lmToolExt.invokeTool(name, options, token);
             },
-            /** @stubbed LanguageModelTool */
             registerTool<T>(name: string, tool: theia.LanguageModelTool<T>): Disposable {
-                return Disposable.NULL;
+                return lmToolExt.registerTool(name, tool, plugin.model.id);
             },
-            /** @stubbed LanguageModelTool */
-            tools: [],
+            get tools(): readonly theia.LanguageModelToolInformation[] {
+                return lmToolExt.getTools();
+            },
             registerMcpServerDefinitionProvider(id: string, provider: any): theia.Disposable {
                 return lmExt.registerMcpServerDefinitionProvider(id, provider);
             },
@@ -1530,6 +1532,7 @@ export function createAPIFactory(
             FileSystemError,
             CommentThreadState,
             CommentThreadCollapsibleState,
+            QuickInputButtonLocation,
             QuickInputButtons,
             CommentMode,
             CallHierarchyItem,

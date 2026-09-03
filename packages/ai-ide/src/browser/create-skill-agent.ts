@@ -15,7 +15,7 @@
 // *****************************************************************************
 import { ChatMode } from '@theia/ai-chat';
 import { LanguageModelRequirement } from '@theia/ai-core';
-import { injectable } from '@theia/core/shared/inversify';
+import { inject, injectable, named } from '@theia/core/shared/inversify';
 import {
     createSkillSystemVariants,
     CREATE_SKILL_SYSTEM_PROMPT_TEMPLATE_ID,
@@ -23,10 +23,13 @@ import {
     CREATE_SKILL_SYSTEM_AGENT_MODE_TEMPLATE_ID,
 } from '../common/create-skill-prompt-template';
 import { AbstractModeAwareChatAgent } from './mode-aware-chat-agent';
-import { nls } from '@theia/core';
+import { ILogger, nls } from '@theia/core';
 
 @injectable()
 export class CreateSkillAgent extends AbstractModeAwareChatAgent {
+
+    @inject(ILogger) @named('ai-ide:CreateSkillAgent')
+    protected override readonly logger: ILogger;
 
     name = 'CreateSkill';
     id = 'CreateSkill';
@@ -35,10 +38,12 @@ export class CreateSkillAgent extends AbstractModeAwareChatAgent {
         identifier: 'default/universal',
     }];
     protected defaultLanguageModelPurpose: string = 'chat';
+    override iconClass: string = 'codicon codicon-wand';
 
     override description = nls.localize('theia/ai/workspace/createSkillAgent/description',
         'An AI assistant for creating new skills. Skills provide reusable instructions and domain knowledge for AI agents. ' +
-        'This agent helps you create well-structured skills in the .prompts/skills directory with proper YAML frontmatter and markdown content.');
+        'This agent helps you create well-structured skills in either the .agents/skills or .prompts/skills directory with proper YAML frontmatter and markdown content. ' +
+        'This feature is still in an early stage and may undergo changes.');
 
     override tags: string[] = [...this.tags, 'Alpha'];
 

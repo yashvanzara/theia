@@ -18,7 +18,7 @@
 /* eslint-disable no-null/no-null */
 
 import * as jsoncparser from 'jsonc-parser';
-import { inject, injectable, postConstruct } from '@theia/core/shared/inversify';
+import { inject, injectable, postConstruct, named } from '@theia/core/shared/inversify';
 import { Disposable } from '@theia/core/lib/common/disposable';
 import {
     PreferenceProviderImpl, PreferenceScope, PreferenceProviderDataChange, PreferenceSchemaService,
@@ -27,7 +27,7 @@ import {
 } from '@theia/core/lib/common';
 import URI from '@theia/core/lib/common/uri';
 import { Deferred } from '@theia/core/lib/common/promise-util';
-import { Emitter, Event } from '@theia/core';
+import { Emitter, Event, ILogger } from '@theia/core';
 import { JSONValue } from '@theia/core/shared/@lumino/coreutils';
 export interface FileContentStatus {
     content: string;
@@ -88,6 +88,9 @@ export abstract class AbstractResourcePreferenceProvider extends PreferenceProvi
     @inject(PreferenceStorageFactory)
     protected readonly preferenceStorageFactory: PreferenceStorageFactory;
 
+    @inject(ILogger) @named('preferences:AbstractResourcePreferenceProvider')
+    protected readonly logger: ILogger;
+
     @postConstruct()
     protected init(): void {
         this.doInit();
@@ -98,6 +101,7 @@ export abstract class AbstractResourcePreferenceProvider extends PreferenceProvi
         this.toDispose.push(Disposable.create(() => this.loading.reject(new Error(`Preference provider for '${uri}' was disposed.`))));
 
         this.preferenceStorage = this.preferenceStorageFactory(uri, this.getScope());
+        this.toDispose.push(this.preferenceStorage);
         this.preferenceStorage.onDidChangeFileContent(async ({ content, fileOK }) => {
             this.fileExists = fileOK;
             this.readPreferencesFromContent(content);
@@ -209,7 +213,7 @@ export abstract class AbstractResourcePreferenceProvider extends PreferenceProvi
                 const scope = schemaProperty.scope;
                 // do not emit the change event if the change is made out of the defined preference scope
                 if (!this.schemaProvider.isValidInScope(prefName, this.getScope())) {
-                    console.warn(`Preference ${prefName} in ${uri} can only be defined in scopes: ${PreferenceScope.getScopeNames(scope).join(', ')}.`);
+                    this.logger.warn(`Preference ${prefName} in ${uri} can only be defined in scopes: ${PreferenceScope.getScopeNames(scope).join(', ')}.`);
                     continue;
                 }
             }

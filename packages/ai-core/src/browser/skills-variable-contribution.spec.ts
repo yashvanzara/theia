@@ -52,7 +52,8 @@ describe('SkillsVariableContribution', () => {
         skillService = {
             getSkills: sinon.stub(),
             getSkill: sinon.stub(),
-            onSkillsChanged: sinon.stub() as unknown as typeof skillService.onSkillsChanged
+            onSkillsChanged: sinon.stub() as unknown as typeof skillService.onSkillsChanged,
+            ready: sinon.stub() as unknown as typeof skillService.ready
         };
 
         container.bind(SkillService).toConstantValue(skillService as unknown as SkillService);
@@ -162,11 +163,13 @@ describe('SkillsVariableContribution', () => {
             const skills: Skill[] = [
                 {
                     name: 'pdf-processing',
+                    qualifiedName: 'pdf-processing',
                     description: 'Processes PDF documents and extracts text content',
                     location: '/path/to/skills/pdf-processing/SKILL.md'
                 },
                 {
                     name: 'data-analysis',
+                    qualifiedName: 'data-analysis',
                     description: 'Analyzes data sets and generates reports',
                     location: '/path/to/skills/data-analysis/SKILL.md'
                 }
@@ -206,6 +209,7 @@ describe('SkillsVariableContribution', () => {
             const skills: Skill[] = [
                 {
                     name: 'test-skill',
+                    qualifiedName: 'test-skill',
                     description: 'Handles <tags> & "quotes" with \'apostrophes\'',
                     location: '/path/to/skill/SKILL.md'
                 }
@@ -227,6 +231,7 @@ describe('SkillsVariableContribution', () => {
             const skills: Skill[] = [
                 {
                     name: 'skill<test>',
+                    qualifiedName: 'skill<test>',
                     description: 'Test skill',
                     location: '/path/with/&special/chars'
                 }
@@ -265,6 +270,7 @@ describe('SkillsVariableContribution', () => {
         it('should return skill content when skill found', async () => {
             const skill: Skill = {
                 name: 'my-skill',
+                qualifiedName: 'my-skill',
                 description: 'A test skill',
                 location: '/path/to/skills/my-skill/SKILL.md'
             };
@@ -292,6 +298,7 @@ This is the skill content.`
         it('should return undefined when file read fails', async () => {
             const skill: Skill = {
                 name: 'my-skill',
+                qualifiedName: 'my-skill',
                 description: 'A test skill',
                 location: '/path/to/skills/my-skill/SKILL.md'
             };

@@ -24,7 +24,8 @@
 import { UUID } from '@theia/core/shared/@lumino/coreutils';
 import { illegalArgument } from '../common/errors';
 import type * as theia from '@theia/plugin';
-import { URI as CodeURI, UriComponents } from '@theia/core/shared/vscode-uri';
+import { URI as CodeURI } from '@theia/core/shared/vscode-uri';
+import { UriComponents } from '../common/uri-components';
 import { relative } from '../common/paths-util';
 import { startsWithIgnoreCase } from '@theia/core/lib/common/strings';
 import { SymbolKind } from '../common/plugin-api-rpc-model';
@@ -736,7 +737,7 @@ export class ThemeIcon {
 
     static readonly Folder: ThemeIcon = new ThemeIcon('folder');
 
-    private constructor(public id: string, public color?: ThemeColor) {
+    constructor(public id: string, public color?: ThemeColor) {
     }
 
 }
@@ -815,7 +816,7 @@ export class RelativePattern {
     }
     set baseUri(baseUri: URI) {
         this._baseUri = baseUri;
-        this.base = baseUri.fsPath;
+        this._base = baseUri.fsPath;
     }
 
     constructor(base: theia.WorkspaceFolder | URI | string, public pattern: string) {
@@ -2225,6 +2226,12 @@ export enum CommentThreadState {
 export enum CommentThreadCollapsibleState {
     Collapsed = 0,
     Expanded = 1
+}
+
+export enum QuickInputButtonLocation {
+    Title = 1,
+    Inline = 2,
+    Input = 3
 }
 
 @es5ClassCompat
@@ -4119,7 +4126,11 @@ export class LanguageModelToolCallPart {
     name: string;
     input: object;
 
-    constructor(callId: string, name: string, input: object) { }
+    constructor(callId: string, name: string, input: object) {
+        this.callId = callId;
+        this.name = name;
+        this.input = input;
+    }
 }
 
 /**
@@ -4129,24 +4140,25 @@ export class LanguageModelToolResultPart {
     callId: string;
     content: Array<LanguageModelTextPart | LanguageModelPromptTsxPart | LanguageModelDataPart | unknown>;
 
-    constructor(callId: string, content: Array<LanguageModelTextPart | LanguageModelPromptTsxPart | LanguageModelDataPart | unknown>) { }
+    constructor(callId: string, content: Array<LanguageModelTextPart | LanguageModelPromptTsxPart | LanguageModelDataPart | unknown>) {
+        this.callId = callId;
+        this.content = content;
+    }
 }
 
-/**
- * @stubbed
- */
 export class LanguageModelTextPart {
     value: string;
-    constructor(value: string) { }
+    constructor(value: string) {
+        this.value = value;
+    }
 }
 
-/**
- * @stubbed
- */
 export class LanguageModelToolResult {
     content: Array<LanguageModelTextPart | LanguageModelPromptTsxPart | LanguageModelDataPart | unknown>;
 
-    constructor(content: Array<LanguageModelTextPart | LanguageModelPromptTsxPart | LanguageModelDataPart | unknown>) { }
+    constructor(content: Array<LanguageModelTextPart | LanguageModelPromptTsxPart | LanguageModelDataPart | unknown>) {
+        this.content = content;
+    }
 }
 
 /**
@@ -4155,12 +4167,11 @@ export class LanguageModelToolResult {
 export class LanguageModelPromptTsxPart {
     value: unknown;
 
-    constructor(value: unknown) { }
+    constructor(value: unknown) {
+        this.value = value;
+    }
 }
 
-/**
- * @stubbed
- */
 export class LanguageModelDataPart {
     static image(data: Uint8Array, mime: string): LanguageModelDataPart {
         return new LanguageModelDataPart(data, mime);
@@ -4175,7 +4186,10 @@ export class LanguageModelDataPart {
     }
     mimeType: string;
     data: Uint8Array;
-    constructor(data: Uint8Array, mimeType: string) { }
+    constructor(data: Uint8Array, mimeType: string) {
+        this.data = data;
+        this.mimeType = mimeType;
+    }
 }
 
 /**

@@ -9,9 +9,6 @@
       "path": "../../dev-packages/cli"
     },
     {
-      "path": "../../dev-packages/native-webpack-plugin"
-    },
-    {
       "path": "../../packages/ai-anthropic"
     },
     {
@@ -72,13 +69,16 @@
       "path": "../../packages/ai-openai"
     },
     {
+      "path": "../../packages/ai-registry"
+    },
+    {
       "path": "../../packages/ai-scanoss"
     },
     {
       "path": "../../packages/ai-terminal"
     },
     {
-      "path": "../../packages/ai-vercel-ai"
+      "path": "../../packages/ai-tool-sketchpad"
     },
     {
       "path": "../../packages/bulk-edit"
@@ -168,9 +168,6 @@
       "path": "../../packages/preferences"
     },
     {
-      "path": "../../packages/preview"
-    },
-    {
       "path": "../../packages/process"
     },
     {
@@ -186,9 +183,6 @@
       "path": "../../packages/scm"
     },
     {
-      "path": "../../packages/scm-extra"
-    },
-    {
       "path": "../../packages/search-in-workspace"
     },
     {
@@ -196,6 +190,9 @@
     },
     {
       "path": "../../packages/task"
+    },
+    {
+      "path": "../../packages/telemetry"
     },
     {
       "path": "../../packages/terminal"

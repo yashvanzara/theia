@@ -14,12 +14,13 @@
 // SPDX-License-Identifier: EPL-2.0 OR GPL-2.0-only WITH Classpath-exception-2.0
 // *****************************************************************************
 
-import { inject, injectable, interfaces, postConstruct } from '@theia/core/shared/inversify';
+import { inject, injectable, interfaces, postConstruct, named } from '@theia/core/shared/inversify';
 import {
     ApplicationShell,
     BaseWidget,
     codicon,
     CompositeTreeNode,
+    ExtractableWidget,
     Message,
     Panel,
     PanelLayout,
@@ -32,10 +33,10 @@ import {
     Widget,
     WidgetManager,
 } from '@theia/core/lib/browser';
-import { Emitter, nls } from '@theia/core';
+import { Disposable, DisposableCollection, Emitter, nls, ILogger } from '@theia/core';
 import { UUID } from '@theia/core/shared/@lumino/coreutils';
 import { TerminalWidget, TerminalWidgetOptions } from '@theia/terminal/lib/browser/base/terminal-widget';
-import { TerminalWidgetImpl } from '@theia/terminal/lib/browser/terminal-widget-impl';
+import { TerminalWidgetImpl, nextTerminalCreationToken } from '@theia/terminal/lib/browser/terminal-widget-impl';
 import { FrontendApplicationStateService } from '@theia/core/lib/browser/frontend-application-state';
 import { TerminalFrontendContribution } from '@theia/terminal/lib/browser/terminal-frontend-contribution';
 import { TerminalManagerPreferences } from './terminal-manager-preferences';
@@ -78,9 +79,12 @@ export namespace TerminalManagerWidgetState {
 }
 
 @injectable()
-export class TerminalManagerWidget extends BaseWidget implements StatefulWidget, ApplicationShell.TrackableWidgetProvider {
+export class TerminalManagerWidget extends BaseWidget implements StatefulWidget, ApplicationShell.TrackableWidgetProvider, ExtractableWidget {
     static ID = 'terminal-manager-widget';
     static LABEL = nls.localize('theia/terminal-manager/label', 'Terminals');
+
+    isExtractable: boolean = true;
+    secondaryWindow: Window | undefined;
 
     protected panel: SplitPanel;
     protected pageAndTreeLayout: SplitLayout | undefined;
@@ -92,6 +96,8 @@ export class TerminalManagerWidget extends BaseWidget implements StatefulWidget,
     terminalWidgets = new Map<TerminalManagerTreeTypes.TerminalKey, TerminalWidget>();
     /** By terminal ID to work from widget to internal metadata. */
     terminalWidgetIdsToNodeIds = new Map<string, TerminalManagerTreeTypes.TerminalKey>();
+    /** Track disposables per terminal to prevent memory leaks. */
+    protected terminalDisposables = new Map<TerminalManagerTreeTypes.TerminalKey, DisposableCollection>();
 
     protected readonly onDidChangeTrackableWidgetsEmitter = new Emitter<Widget[]>();
     readonly onDidChangeTrackableWidgets = this.onDidChangeTrackableWidgetsEmitter.event;
@@ -112,6 +118,8 @@ export class TerminalManagerWidget extends BaseWidget implements StatefulWidget,
     @inject(FrontendApplicationStateService) protected readonly applicationStateService: FrontendApplicationStateService;
     @inject(WidgetManager) protected readonly widgetManager: WidgetManager;
     @inject(StorageService) protected readonly storageService: StorageService;
+    @inject(ILogger) @named('terminal-manager:TerminalManagerWidget')
+    protected readonly logger: ILogger;
 
     protected readonly terminalsDeletingFromClose = new Set<TerminalManagerTreeTypes.TerminalKey>();
 
@@ -161,11 +169,7 @@ export class TerminalManagerWidget extends BaseWidget implements StatefulWidget,
 
     async createTerminalWidget(options: TerminalWidgetOptions = {}): Promise<TerminalWidget> {
         const terminalWidget = await this.terminalFrontendContribution.newTerminal({
-            // passing 'created' here as a millisecond value rather than the default `new Date().toString()` that Theia uses in
-            // its factory (resolves to something like 'Tue Aug 09 2022 13:21:26 GMT-0500 (Central Daylight Time)').
-            // The state restoration system relies on identifying terminals by their unique options, using an ms value ensures we don't
-            // get a duplication since the original date method is only accurate to within 1s.
-            created: new Date().getTime().toString(),
+            created: nextTerminalCreationToken(),
             ...options,
         } as TerminalWidgetOptions);
         terminalWidget.start();
@@ -190,14 +194,20 @@ export class TerminalManagerWidget extends BaseWidget implements StatefulWidget,
         this.toDispose.push(this.treeWidget.model.onDidDeleteTerminalFromGroup(({
             terminalId,
         }) => this.handleTerminalDeleted(terminalId)));
-        this.toDispose.push(this.treeWidget.model.onDidRenameNode(() => this.handlePageRenamed()));
+        this.toDispose.push(this.treeWidget.model.onDidRenameNode(node => this.handleNodeRenamed(node)));
 
         this.toDispose.push(this.shell.onDidChangeActiveWidget(({ newValue }) => this.handleOnDidChangeActiveWidget(newValue)));
 
         this.toDispose.push(this.terminalManagerPreferences.onPreferenceChanged(() => this.resolveMainLayout()));
     }
 
-    protected handlePageRenamed(): void {
+    protected handleNodeRenamed(node: TerminalManagerTreeTypes.TerminalManagerTreeNode): void {
+        if (TerminalManagerTreeTypes.isTerminalNode(node)) {
+            const widget = this.terminalWidgets.get(node.id);
+            if (widget) {
+                widget.setTitle(node.label);
+            }
+        }
         this.update();
     }
 
@@ -273,6 +283,8 @@ export class TerminalManagerWidget extends BaseWidget implements StatefulWidget,
 
     protected async confirmClose(): Promise<boolean> {
         const CLOSE = nls.localizeByDefault('Close');
+        // When the widget lives in a secondary window, open the dialog there so it is visible to the user.
+        const dialogOptions = this.secondaryWindow ? { node: this.secondaryWindow.document.createElement('div') } : undefined;
         const dialog = new ConfirmDialog({
             title: nls.localize('theia/terminal-manager/closeDialog/title', 'Do you want to close the terminal manager?'),
             msg: nls.localize(
@@ -281,45 +293,80 @@ export class TerminalManagerWidget extends BaseWidget implements StatefulWidget,
             ),
             ok: CLOSE,
             cancel: nls.localizeByDefault('Cancel'),
-        });
+        }, dialogOptions);
         const confirmed = await dialog.open();
         return confirmed === true;
     }
 
-    addTerminalPage(widget: Widget): void {
-        this.doAddTerminalPage(widget);
-    }
-
-    protected doAddTerminalPage(widget: Widget): TerminalManagerTreeTypes.PageSplitPanel | undefined {
+    /**
+     * Add a terminal to a page. If no `pageId` is given, a new auto-numbered
+     * page is created. If a `pageId` is given, the existing page is reused
+     * or a new one is created (with special-page config applied if available).
+     */
+    addTerminalPage(widget: Widget, pageId?: TerminalManagerTreeTypes.PageId): void {
         if (widget instanceof TerminalWidgetImpl) {
+            const resolvedPageId = pageId ?? this.createPagePanel().id;
             const terminalKey = TerminalManagerTreeTypes.generateTerminalKey(widget);
             this.addTerminalReference(widget, terminalKey);
             this.onDidChangeTrackableWidgetsEmitter.fire(this.getTrackableWidgets());
             const groupPanel = this.createTerminalGroupPanel();
             groupPanel.addWidget(widget);
-            const pagePanel = this.createPagePanel();
-            pagePanel.addWidget(groupPanel);
-            this.treeWidget.model.addTerminalPage(terminalKey, groupPanel.id, pagePanel.id);
-            return pagePanel;
+            this.treeWidget.model.addTerminalPage(terminalKey, groupPanel.id, resolvedPageId, widget.title.label);
         }
     }
 
     protected addTerminalReference(widget: TerminalWidget, nodeId: TerminalManagerTreeTypes.TerminalKey): void {
         this.terminalWidgets.set(nodeId, widget);
         this.terminalWidgetIdsToNodeIds.set(widget.id, nodeId);
+
+        // Create disposable collection for this terminal
+        const disposables = new DisposableCollection();
+
+        // Track title label changes with proper disposal
+        let currentLabel = widget.title.label;
+        const titleChangeHandler = () => {
+            if (widget.title.label !== currentLabel) {
+                currentLabel = widget.title.label;
+                this.treeWidget.model.updateTerminalLabel(nodeId, currentLabel);
+            }
+        };
+        widget.title.changed.connect(titleChangeHandler);
+        disposables.push(Disposable.create(() => widget.title.changed.disconnect(titleChangeHandler)));
+
+        // When the terminal widget is disposed externally (e.g. debug process
+        // exits), remove its tree node so the manager doesn't show an empty
+        // entry.
+        const onWidgetDisposed = () => {
+            if (this.terminalWidgets.has(nodeId)) {
+                this.deleteTerminal(nodeId);
+            }
+        };
+        widget.disposed.connect(onWidgetDisposed);
+        disposables.push(Disposable.create(() => widget.disposed.disconnect(onWidgetDisposed)));
+
+        this.terminalDisposables.set(nodeId, disposables);
     }
 
     protected removeTerminalReferenceByWidgetId(widgetId: string): boolean {
         const nodeId = this.terminalWidgetIdsToNodeIds.get(widgetId);
-        if (nodeId === undefined) {return false; }
-        return this.terminalWidgets.delete(nodeId);
+        if (nodeId === undefined) { return false; }
+        this.removeTerminalReferenceByNodeId(nodeId);
+        return true;
     }
 
     protected removeTerminalReferenceByNodeId(nodeId: TerminalManagerTreeTypes.TerminalKey): boolean {
         const widget = this.terminalWidgets.get(nodeId);
-        if (!widget) {return false; }
+        if (!widget) { return false; }
         this.terminalWidgets.delete(nodeId);
         this.terminalWidgetIdsToNodeIds.delete(widget.id);
+
+        // Dispose signal connections
+        const disposables = this.terminalDisposables.get(nodeId);
+        if (disposables) {
+            disposables.dispose();
+            this.terminalDisposables.delete(nodeId);
+        }
+
         return true;
     }
 
@@ -359,11 +406,12 @@ export class TerminalManagerWidget extends BaseWidget implements StatefulWidget,
     }
 
     protected handlePageAdded(pageId: TerminalManagerTreeTypes.PageId): void {
-        const pagePanel = this.pagePanels.get(pageId);
-        if (pagePanel) {
-            this.terminalPanelWrapper.addWidget(pagePanel);
-            this.update();
+        let pagePanel = this.pagePanels.get(pageId);
+        if (!pagePanel) {
+            pagePanel = this.createPagePanel(pageId);
         }
+        this.terminalPanelWrapper.addWidget(pagePanel);
+        this.update();
     }
 
     protected handlePageDeleted(pagePanelId: TerminalManagerTreeTypes.PageId): void {
@@ -399,7 +447,7 @@ export class TerminalManagerWidget extends BaseWidget implements StatefulWidget,
             this.onDidChangeTrackableWidgetsEmitter.fire(this.getTrackableWidgets());
             const groupPanel = this.createTerminalGroupPanel();
             groupPanel.addWidget(widget);
-            this.treeWidget.model.addTerminalGroup(terminalId, groupPanel.id, pageId);
+            this.treeWidget.model.addTerminalGroup(terminalId, groupPanel.id, pageId, widget.title.label);
         }
     }
 
@@ -466,7 +514,7 @@ export class TerminalManagerWidget extends BaseWidget implements StatefulWidget,
 
     protected clearTerminalReferences(panel: TerminalManagerTreeTypes.GroupSplitPanel): void {
         for (const terminal of panel.widgets) {
-                this.removeTerminalReferenceByWidgetId(terminal.id);
+            this.removeTerminalReferenceByWidgetId(terminal.id);
         }
     }
 
@@ -475,7 +523,7 @@ export class TerminalManagerWidget extends BaseWidget implements StatefulWidget,
             const newTerminalId = TerminalManagerTreeTypes.generateTerminalKey(widget);
             this.addTerminalReference(widget, newTerminalId);
             this.onDidChangeTrackableWidgetsEmitter.fire(this.getTrackableWidgets());
-            this.treeWidget.model.addTerminal(newTerminalId, groupId);
+            this.treeWidget.model.addTerminal(newTerminalId, groupId, widget.title.label);
         }
     }
 
@@ -504,10 +552,12 @@ export class TerminalManagerWidget extends BaseWidget implements StatefulWidget,
 
     protected handleTerminalDeleted(terminalId: TerminalManagerTreeTypes.TerminalKey): void {
         const terminalWidget = this.terminalWidgets.get(terminalId);
+        // Remove the reference before disposing so the disposed-signal
+        // handler does not re-enter deleteTerminal.
+        this.removeTerminalReferenceByNodeId(terminalId);
         if (!terminalWidget?.isDisposed) {
             terminalWidget?.dispose();
         }
-        this.removeTerminalReferenceByNodeId(terminalId);
     }
 
     protected handleOnDidChangeActiveWidget(widget: Widget | null): void {
@@ -562,12 +612,14 @@ export class TerminalManagerWidget extends BaseWidget implements StatefulWidget,
 
     restoreState(oldState: TerminalManagerWidgetState.LayoutData): void {
         const { items, widget, terminalAndTreeRelativeSizes } = oldState;
-        if (widget && terminalAndTreeRelativeSizes && items) {
-            this.setPanelSizes(terminalAndTreeRelativeSizes);
+        if (widget && items) {
+            if (terminalAndTreeRelativeSizes) {
+                this.setPanelSizes(terminalAndTreeRelativeSizes);
+            }
             try {
                 this.restoreLayoutData(items, widget);
             } catch (e) {
-                console.error(e);
+                this.logger.error(e);
                 this.resetLayout();
                 this.populateLayout(true);
             } finally {
@@ -588,9 +640,10 @@ export class TerminalManagerWidget extends BaseWidget implements StatefulWidget,
 
     async resetView(): Promise<void> {
         const terminalWidget = await this.createTerminalWidget();
-        const page = this.doAddTerminalPage(terminalWidget);
+        const pagePanel = this.createPagePanel();
+        this.addTerminalPage(terminalWidget, pagePanel.id);
         for (const id of this.pagePanels.keys()) {
-            if (id !== page?.id) {
+            if (id !== pagePanel.id) {
                 this.deletePage(id);
             }
         }
@@ -725,6 +778,10 @@ export class TerminalManagerWidget extends BaseWidget implements StatefulWidget,
     }
 
     override dispose(): void {
+        // Dispose all remaining signal connections
+        this.terminalDisposables.forEach(disposables => disposables.dispose());
+        this.terminalDisposables.clear();
+
         this.toDispose.dispose();
         super.dispose();
         this.terminalWidgets.clear();

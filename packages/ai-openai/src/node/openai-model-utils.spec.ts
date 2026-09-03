@@ -16,8 +16,7 @@
 import { expect } from 'chai';
 import { OpenAiModelUtils } from './openai-language-model';
 import { LanguageModelMessage } from '@theia/ai-core';
-import { OpenAiResponseApiUtils, recursiveStrictJSONSchema } from './openai-response-api-utils';
-import type { JSONSchema, JSONSchemaDefinition } from 'openai/lib/jsonschema';
+import { OpenAiResponseApiUtils } from './openai-response-api-utils';
 
 const utils = new OpenAiModelUtils();
 const responseUtils = new OpenAiResponseApiUtils();
@@ -122,6 +121,103 @@ describe('OpenAiModelUtils - processMessages', () => {
                 { role: 'user', content: 'user message' },
                 { role: 'developer', content: 'system message' },
                 { role: 'assistant', content: 'ai message' }
+            ]);
+        });
+    });
+
+    describe('merging of consecutive assistant messages', () => {
+        it('should merge an assistant text message followed by an assistant tool_use into a single message', () => {
+            const messages: LanguageModelMessage[] = [
+                { actor: 'user', type: 'text', text: 'do something' },
+                { actor: 'ai', type: 'text', text: 'let me call a tool' },
+                { actor: 'ai', type: 'tool_use', id: 'call_1', name: 'foo', input: { x: 1 } }
+            ];
+            const result = utils.processMessages(messages, 'developer', 'gpt-4');
+            expect(result).to.deep.equal([
+                { role: 'user', content: 'do something' },
+                {
+                    role: 'assistant',
+                    content: 'let me call a tool',
+                    tool_calls: [{ id: 'call_1', function: { name: 'foo', arguments: JSON.stringify({ x: 1 }) }, type: 'function' }]
+                }
+            ]);
+        });
+
+        it('should merge multiple parallel assistant tool_use messages into a single message with multiple tool_calls', () => {
+            const messages: LanguageModelMessage[] = [
+                { actor: 'user', type: 'text', text: 'do parallel work' },
+                { actor: 'ai', type: 'tool_use', id: 'call_1', name: 'foo', input: { x: 1 } },
+                { actor: 'ai', type: 'tool_use', id: 'call_2', name: 'bar', input: { y: 2 } }
+            ];
+            const result = utils.processMessages(messages, 'developer', 'gpt-4');
+            expect(result).to.deep.equal([
+                { role: 'user', content: 'do parallel work' },
+                {
+                    role: 'assistant',
+                    tool_calls: [
+                        { id: 'call_1', function: { name: 'foo', arguments: JSON.stringify({ x: 1 }) }, type: 'function' },
+                        { id: 'call_2', function: { name: 'bar', arguments: JSON.stringify({ y: 2 }) }, type: 'function' }
+                    ]
+                }
+            ]);
+        });
+
+        it('should handle the bug scenario from issue #17104 (text+tool_use after a tool_result round-trip)', () => {
+            // Reproduces the role-alternation violation rejected by strict Jinja-template providers (e.g. llama.cpp serving Devstral).
+            const messages: LanguageModelMessage[] = [
+                { actor: 'user', type: 'text', text: 'first request' },
+                { actor: 'ai', type: 'tool_use', id: 'call_1', name: 'foo', input: {} },
+                { actor: 'user', type: 'tool_result', tool_use_id: 'call_1', name: 'foo', content: 'result_1' },
+                { actor: 'ai', type: 'text', text: 'follow-up reasoning' },
+                { actor: 'ai', type: 'tool_use', id: 'call_2', name: 'bar', input: {} }
+            ];
+            const result = utils.processMessages(messages, 'developer', 'gpt-4');
+            expect(result).to.deep.equal([
+                { role: 'user', content: 'first request' },
+                {
+                    role: 'assistant',
+                    tool_calls: [{ id: 'call_1', function: { name: 'foo', arguments: '{}' }, type: 'function' }]
+                },
+                { role: 'tool', tool_call_id: 'call_1', content: 'result_1' },
+                {
+                    role: 'assistant',
+                    content: 'follow-up reasoning',
+                    tool_calls: [{ id: 'call_2', function: { name: 'bar', arguments: '{}' }, type: 'function' }]
+                }
+            ]);
+            // Sanity check: no two consecutive assistant messages remain in the output.
+            for (let i = 1; i < result.length; i++) {
+                expect(result[i - 1].role === 'assistant' && result[i].role === 'assistant').to.equal(false);
+            }
+        });
+
+        it('should not merge non-adjacent assistant messages separated by a tool result', () => {
+            const messages: LanguageModelMessage[] = [
+                { actor: 'ai', type: 'tool_use', id: 'call_1', name: 'foo', input: {} },
+                { actor: 'user', type: 'tool_result', tool_use_id: 'call_1', name: 'foo', content: 'r' },
+                { actor: 'ai', type: 'text', text: 'final answer' }
+            ];
+            const result = utils.processMessages(messages, 'developer', 'gpt-4');
+            expect(result).to.deep.equal([
+                {
+                    role: 'assistant',
+                    tool_calls: [{ id: 'call_1', function: { name: 'foo', arguments: '{}' }, type: 'function' }]
+                },
+                { role: 'tool', tool_call_id: 'call_1', content: 'r' },
+                { role: 'assistant', content: 'final answer' }
+            ]);
+        });
+
+        it('should join multiple consecutive assistant text messages with a newline', () => {
+            const messages: LanguageModelMessage[] = [
+                { actor: 'user', type: 'text', text: 'q' },
+                { actor: 'ai', type: 'text', text: 'part one' },
+                { actor: 'ai', type: 'text', text: 'part two' }
+            ];
+            const result = utils.processMessages(messages, 'developer', 'gpt-4');
+            expect(result).to.deep.equal([
+                { role: 'user', content: 'q' },
+                { role: 'assistant', content: 'part one\npart two' }
             ]);
         });
     });
@@ -395,107 +491,6 @@ describe('OpenAiModelUtils - processMessagesForResponseApi', () => {
             const messages = [invalidMessage] as unknown as LanguageModelMessage[];
             expect(() => responseUtils.processMessages(messages, 'developer', 'gpt-4'))
                 .to.throw('unhandled case');
-        });
-    });
-
-    describe('recursiveStrictJSONSchema', () => {
-        it('should return the same object and not modify it when schema has no properties to strictify', () => {
-            const schema: JSONSchema = { type: 'string', description: 'Simple string' };
-            const originalJson = JSON.stringify(schema);
-
-            const result = recursiveStrictJSONSchema(schema);
-
-            expect(result).to.equal(schema);
-            expect(JSON.stringify(schema)).to.equal(originalJson);
-            const resultObj = result as JSONSchema;
-            expect(resultObj).to.not.have.property('additionalProperties');
-            expect(resultObj).to.not.have.property('required');
-        });
-
-        it('should not mutate original but return a new strictified schema when branching applies (properties/items)', () => {
-            const original: JSONSchema = {
-                type: 'object',
-                properties: {
-                    path: { type: 'string' },
-                    data: {
-                        type: 'array',
-                        items: {
-                            type: 'object',
-                            properties: {
-                                a: { type: 'string' }
-                            }
-                        }
-                    }
-                }
-            };
-            const originalClone = JSON.parse(JSON.stringify(original));
-
-            const resultDef = recursiveStrictJSONSchema(original);
-            const result = resultDef as JSONSchema;
-
-            expect(result).to.not.equal(original);
-            expect(original).to.deep.equal(originalClone);
-
-            expect(result.additionalProperties).to.equal(false);
-            expect(result.required).to.have.members(['path', 'data']);
-
-            const itemsDef = (result.properties?.data as JSONSchema).items as JSONSchemaDefinition;
-            expect(itemsDef).to.be.ok;
-            const itemsObj = itemsDef as JSONSchema;
-            expect(itemsObj.additionalProperties).to.equal(false);
-            expect(itemsObj.required).to.have.members(['a']);
-
-            const originalItems = ((original.properties!.data as JSONSchema).items) as JSONSchema;
-            expect(originalItems).to.not.have.property('additionalProperties');
-            expect(originalItems).to.not.have.property('required');
-        });
-
-        it('should strictify nested parameters schema and not mutate the original', () => {
-            const replacementProperties: Record<string, JSONSchema> = {
-                oldContent: { type: 'string', description: 'The exact content to be replaced. Must match exactly, including whitespace, comments, etc.' },
-                newContent: { type: 'string', description: 'The new content to insert in place of matched old content.' },
-                multiple: { type: 'boolean', description: 'Set to true if multiple occurrences of the oldContent are expected to be replaced.' }
-            };
-
-            const parameters: JSONSchema = {
-                type: 'object',
-                properties: {
-                    path: { type: 'string', description: 'The path of the file where content will be replaced.' },
-                    replacements: {
-                        type: 'array',
-                        items: {
-                            type: 'object',
-                            properties: replacementProperties,
-                            required: ['oldContent', 'newContent']
-                        },
-                        description: 'An array of replacement objects, each containing oldContent and newContent strings.'
-                    },
-                    reset: {
-                        type: 'boolean',
-                        description: 'Set to true to clear any existing pending changes for this file and start fresh. Default is false, which merges with existing changes.'
-                    }
-                },
-                required: ['path', 'replacements']
-            };
-
-            const originalClone = JSON.parse(JSON.stringify(parameters));
-
-            const strictifiedDef = recursiveStrictJSONSchema(parameters);
-            const strictified = strictifiedDef as JSONSchema;
-
-            expect(strictified).to.not.equal(parameters);
-            expect(parameters).to.deep.equal(originalClone);
-
-            expect(strictified.additionalProperties).to.equal(false);
-            expect(strictified.required).to.have.members(['path', 'replacements', 'reset']);
-
-            const items = (strictified.properties!.replacements as JSONSchema).items as JSONSchema;
-            expect(items.additionalProperties).to.equal(false);
-            expect(items.required).to.have.members(['oldContent', 'newContent', 'multiple']);
-
-            const origItems = ((parameters.properties!.replacements as JSONSchema).items) as JSONSchema;
-            expect(origItems.required).to.deep.equal(['oldContent', 'newContent']);
-            expect(origItems).to.not.have.property('additionalProperties');
         });
     });
 

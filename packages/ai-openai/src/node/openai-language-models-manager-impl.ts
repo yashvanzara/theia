@@ -14,11 +14,24 @@
 // SPDX-License-Identifier: EPL-2.0 OR GPL-2.0-only WITH Classpath-exception-2.0
 // *****************************************************************************
 
-import { LanguageModelRegistry, LanguageModelStatus, TokenUsageService } from '@theia/ai-core';
-import { inject, injectable } from '@theia/core/shared/inversify';
-import { OpenAiModel, OpenAiModelUtils } from './openai-language-model';
+import { LanguageModelRegistry, LanguageModelStatus, ReasoningSupport } from '@theia/ai-core';
+import { getProxyUrl } from '@theia/ai-core/lib/node';
+import { inject, injectable, named } from '@theia/core/shared/inversify';
+import { DeveloperMessageSettings, OpenAiModel, OpenAiModelUtils } from './openai-language-model';
 import { OpenAiResponseApiUtils } from './openai-response-api-utils';
+import { getOpenAiModelDefaults } from './openai-model-defaults';
 import { OpenAiLanguageModelsManager, OpenAiModelDescription } from '../common';
+import { ILogger } from '@theia/core';
+import { OPENAI_SERVER_TOOLS } from './openai-server-tools';
+
+interface ResolvedModelMetadata {
+    maxInputTokens?: number;
+    reasoningSupport?: ReasoningSupport;
+    developerMessageSettings: DeveloperMessageSettings;
+    enableStreaming: boolean;
+    supportsStructuredOutput: boolean;
+    serverSideCompactionSupport: boolean;
+}
 
 @injectable()
 export class OpenAiLanguageModelsManagerImpl implements OpenAiLanguageModelsManager {
@@ -29,15 +42,15 @@ export class OpenAiLanguageModelsManagerImpl implements OpenAiLanguageModelsMana
     @inject(OpenAiResponseApiUtils)
     protected readonly responseApiUtils: OpenAiResponseApiUtils;
 
+    @inject(ILogger) @named('ai-openai:OpenAiLanguageModelsManagerImpl')
+    protected readonly logger: ILogger;
+
     protected _apiKey: string | undefined;
     protected _apiVersion: string | undefined;
     protected _proxyUrl: string | undefined;
 
     @inject(LanguageModelRegistry)
     protected readonly languageModelRegistry: LanguageModelRegistry;
-
-    @inject(TokenUsageService)
-    protected readonly tokenUsageService: TokenUsageService;
 
     get apiKey(): string | undefined {
         return this._apiKey ?? process.env.OPENAI_API_KEY;
@@ -48,7 +61,7 @@ export class OpenAiLanguageModelsManagerImpl implements OpenAiLanguageModelsMana
     }
 
     protected calculateStatus(modelDescription: OpenAiModelDescription, effectiveApiKey: string | undefined): LanguageModelStatus {
-        // Always mark custom models (models with url) as ready for now as we do not know about API Key requirements
+        // Custom models (with `url`) are always marked ready since their API key requirements are unknown.
         if (modelDescription.url) {
             return { status: 'ready' };
         }
@@ -80,49 +93,36 @@ export class OpenAiLanguageModelsManagerImpl implements OpenAiLanguageModelsMana
                 }
                 return undefined;
             };
-            const proxyUrlProvider = (url: string | undefined) => {
-                // first check if the proxy url is provided via Theia settings
-                if (this._proxyUrl) {
-                    return this._proxyUrl;
-                }
+            const proxyUrl = getProxyUrl(modelDescription.url ?? 'https://api.openai.com', this._proxyUrl);
 
-                // if not fall back to the environment variables
-                let protocolVar;
-                if (url && url.startsWith('http:')) {
-                    protocolVar = 'http_proxy';
-                } else if (url && url.startsWith('https:')) {
-                    protocolVar = 'https_proxy';
-                }
-
-                if (protocolVar) {
-                    // Get the environment variable
-                    return process.env[protocolVar];
-                }
-
-                // neither the settings nor the environment variable is set
-                return undefined;
-            };
-
-            // Determine the effective API key for status
             const status = this.calculateStatus(modelDescription, apiKeyProvider());
+            const metadata = this.resolveMetadata(modelDescription);
+            const serverTools = this.resolveServerTools(modelDescription);
 
             if (model) {
                 if (!(model instanceof OpenAiModel)) {
-                    console.warn(`OpenAI: model ${modelDescription.id} is not an OpenAI model`);
+                    this.logger.warn(`OpenAI: model ${modelDescription.id} is not an OpenAI model`);
                     continue;
                 }
                 await this.languageModelRegistry.patchLanguageModel<OpenAiModel>(modelDescription.id, {
                     model: modelDescription.model,
-                    enableStreaming: modelDescription.enableStreaming,
+                    enableStreaming: metadata.enableStreaming,
                     url: modelDescription.url,
                     apiKey: apiKeyProvider,
                     apiVersion: apiVersionProvider,
                     deployment: modelDescription.deployment,
-                    developerMessageSettings: modelDescription.developerMessageSettings || 'developer',
-                    supportsStructuredOutput: modelDescription.supportsStructuredOutput,
+                    developerMessageSettings: metadata.developerMessageSettings,
+                    supportsStructuredOutput: metadata.supportsStructuredOutput,
                     status,
                     maxRetries: modelDescription.maxRetries,
-                    useResponseApi: modelDescription.useResponseApi ?? false
+                    useResponseApi: modelDescription.useResponseApi ?? false,
+                    proxy: proxyUrl,
+                    reasoningSupport: metadata.reasoningSupport,
+                    maxInputTokens: metadata.maxInputTokens,
+                    serverTools,
+                    serverSideCompactionSupport: metadata.serverSideCompactionSupport,
+                    serverSideCompactionEnabledByDefault: modelDescription.serverSideCompactionEnabledByDefault ?? false,
+                    serverSideCompactionTokenThresholdByDefault: modelDescription.serverSideCompactionTokenThresholdByDefault
                 });
             } else {
                 this.languageModelRegistry.addLanguageModels([
@@ -130,23 +130,51 @@ export class OpenAiLanguageModelsManagerImpl implements OpenAiLanguageModelsMana
                         modelDescription.id,
                         modelDescription.model,
                         status,
-                        modelDescription.enableStreaming,
+                        metadata.enableStreaming,
                         apiKeyProvider,
                         apiVersionProvider,
-                        modelDescription.supportsStructuredOutput,
+                        metadata.supportsStructuredOutput,
                         modelDescription.url,
                         modelDescription.deployment,
                         this.openAiModelUtils,
                         this.responseApiUtils,
-                        modelDescription.developerMessageSettings,
+                        metadata.developerMessageSettings,
                         modelDescription.maxRetries,
                         modelDescription.useResponseApi ?? false,
-                        this.tokenUsageService,
-                        proxyUrlProvider(modelDescription.url)
+                        proxyUrl,
+                        metadata.reasoningSupport,
+                        metadata.maxInputTokens,
+                        serverTools,
+                        metadata.serverSideCompactionSupport,
+                        modelDescription.serverSideCompactionEnabledByDefault ?? false,
+                        modelDescription.serverSideCompactionTokenThresholdByDefault
                     )
                 ]);
             }
         }
+    }
+
+    protected resolveServerTools(description: OpenAiModelDescription): typeof OPENAI_SERVER_TOOLS | undefined {
+        return description.useResponseApi && !description.url ? OPENAI_SERVER_TOOLS : undefined;
+    }
+
+    /**
+     * Merges description overrides with model-id-based defaults from {@link getOpenAiModelDefaults}.
+     * Description fields win, allowing custom-endpoint preferences to override capabilities for
+     * non-OpenAI models. Custom endpoints (with a `url`) skip the context window lookup since we
+     * don't know which model is actually behind the endpoint.
+     */
+    protected resolveMetadata(description: OpenAiModelDescription): ResolvedModelMetadata {
+        const defaults = getOpenAiModelDefaults(description.model);
+        return {
+            maxInputTokens: description.url ? undefined : defaults.contextWindow,
+            reasoningSupport: description.reasoningSupport ?? defaults.reasoningSupport,
+            developerMessageSettings: description.developerMessageSettings ?? defaults.developerMessageSettings ?? 'developer',
+            enableStreaming: description.enableStreaming ?? defaults.supportsStreaming ?? true,
+            supportsStructuredOutput: description.supportsStructuredOutput ?? defaults.supportsStructuredOutput ?? true,
+            // Server-side compaction is only available via the Response API.
+            serverSideCompactionSupport: description.useResponseApi ?? false
+        };
     }
 
     removeLanguageModels(...modelIds: string[]): void {

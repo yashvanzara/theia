@@ -178,7 +178,7 @@ const CopyToClipboardButton = (props: { code: string, clipboardService: Clipboar
     }, [code, clipboardService]);
 
     const iconClass = copied ? 'codicon-check' : 'codicon-copy';
-    const title = copied ? nls.localize('theia/ai/chat-ui/code-part-renderer/copied', 'Copied') : nls.localizeByDefault('Copy');
+    const title = copied ? nls.localizeByDefault('Copied') : nls.localizeByDefault('Copy');
     return <div className={`button codicon ${iconClass}`} title={title} role='button' onClick={copyCodeToClipboard}></div>;
 };
 
@@ -244,7 +244,7 @@ export const CodeWrapper = (props: {
             wordWrap: 'off',
             codeLens: false,
             inlayHints: { enabled: 'off' },
-            hover: { enabled: false }
+            hover: { enabled: 'off' }
         });
         editor.document.textEditorModel.setValue(props.content);
         editor.getControl().onContextMenu(e => props.contextMenuCallback(e.event));

@@ -14,7 +14,8 @@
 // SPDX-License-Identifier: EPL-2.0 OR GPL-2.0-only WITH Classpath-exception-2.0
 // *****************************************************************************
 import { ChatAgentService } from '@theia/ai-chat';
-import { AIVariableService } from '@theia/ai-core/lib/common';
+import { ImageContextVariable } from '@theia/ai-chat/lib/common/image-context-variable';
+import { AIVariableService, DEFERRED_FUNCTION_MARKER } from '@theia/ai-core/lib/common';
 import { PromptText } from '@theia/ai-core/lib/common/prompt-text';
 import { PromptService, BasePromptFragment } from '@theia/ai-core/lib/common/prompt-service';
 import { ToolInvocationRegistry } from '@theia/ai-core/lib/common/tool-invocation-registry';
@@ -24,7 +25,8 @@ import { ContextKeyService } from '@theia/core/lib/browser/context-key-service';
 import { inject, injectable } from '@theia/core/shared/inversify';
 import * as monaco from '@theia/monaco-editor-core';
 import { ProviderResult } from '@theia/monaco-editor-core/esm/vs/editor/common/languages';
-import { AIChatFrontendContribution, VARIABLE_ADD_CONTEXT_COMMAND } from '@theia/ai-chat/lib/browser/ai-chat-frontend-contribution';
+import { AIChatFrontendContribution, OPEN_FILE_BY_PATH_COMMAND, VARIABLE_ADD_CONTEXT_COMMAND } from '@theia/ai-chat/lib/browser/ai-chat-frontend-contribution';
+import { PendingImageRegistry } from '@theia/ai-chat/lib/browser/pending-image-registry';
 
 export const CHAT_VIEW_LANGUAGE_ID = 'theia-ai-chat-view-language';
 export const SETTINGS_LANGUAGE_ID = 'theia-ai-chat-settings-language';
@@ -35,6 +37,13 @@ const VARIABLE_ARGUMENT_PICKER_COMMAND = 'trigger-variable-argument-picker';
 
 interface CompletionSource<T> {
     triggerCharacter: string;
+    /**
+     * Optional marker that may appear between the trigger character and the word,
+     * e.g. the deferred function marker in `~?toolId`. When set, completions are
+     * also offered after `<triggerCharacter><deferMarker>` and the marker acts as
+     * an additional trigger character.
+     */
+    deferMarker?: string;
     getItems: () => T[];
     kind: monaco.languages.CompletionItemKind;
     getId: (item: T) => string;
@@ -64,11 +73,15 @@ export class ChatViewLanguageContribution implements FrontendApplicationContribu
     @inject(ContextKeyService)
     protected readonly contextKeyService: ContextKeyService;
 
+    @inject(PendingImageRegistry)
+    protected readonly pendingImageRegistry: PendingImageRegistry;
+
     onStart(_app: FrontendApplication): MaybePromise<void> {
         monaco.languages.register({ id: CHAT_VIEW_LANGUAGE_ID, extensions: [CHAT_VIEW_LANGUAGE_EXTENSION] });
         monaco.languages.register({ id: SETTINGS_LANGUAGE_ID, extensions: ['json'], filenames: ['editor'] });
 
         this.registerCompletionProviders();
+        this.registerHoverProvider();
 
         monaco.editor.registerCommand(VARIABLE_ARGUMENT_PICKER_COMMAND, this.triggerVariableArgumentPicker.bind(this));
     }
@@ -98,6 +111,7 @@ export class ChatViewLanguageContribution implements FrontendApplicationContribu
 
         this.registerStandardCompletionProvider({
             triggerCharacter: PromptText.FUNCTION_CHAR,
+            deferMarker: DEFERRED_FUNCTION_MARKER,
             getItems: () => this.toolInvocationRegistry.getAllFunctions(),
             kind: monaco.languages.CompletionItemKind.Function,
             getId: tool => `${tool.id} `,
@@ -120,32 +134,133 @@ export class ChatViewLanguageContribution implements FrontendApplicationContribu
         });
     }
 
+    protected registerHoverProvider(): void {
+        monaco.languages.registerHoverProvider(CHAT_VIEW_LANGUAGE_ID, {
+            provideHover: (model, position, _token): ProviderResult<monaco.languages.Hover> =>
+                this.provideImageHover(model, position),
+        });
+    }
+
+    protected provideImageHover(model: monaco.editor.ITextModel, position: monaco.Position): monaco.languages.Hover | undefined {
+        const line = model.getLineContent(position.lineNumber);
+        const editorUri = model.uri.toString();
+
+        // Look up the model ID for this editor to get the correct scope
+        const modelId = this.pendingImageRegistry.getModelIdForEditor(editorUri);
+        const scopeUri = modelId ? this.pendingImageRegistry.getScopeUriForModel(modelId) : undefined;
+
+        // Find #imageContext: patterns in the line - can be short ID (img_1) or full JSON
+        const imageContextRegex = /#imageContext:(\S+)/g;
+        let match: RegExpExecArray | undefined;
+
+        while ((match = imageContextRegex.exec(line) ?? undefined) !== undefined) {
+            const startColumn = match.index + 1; // 1-based
+            const endColumn = startColumn + match[0].length;
+
+            // Check if cursor is within this match
+            if (position.column >= startColumn && position.column <= endColumn) {
+                const arg = match[1];
+
+                // First, check if it's a short ID in the pending image registry
+                if (scopeUri && this.pendingImageRegistry.isShortId(arg)) {
+                    const pendingData = this.pendingImageRegistry.get(scopeUri, arg);
+                    if (pendingData) {
+                        const imageVariable = pendingData.imageVariable;
+                        const imageName = imageVariable.name ?? imageVariable.wsRelativePath ?? 'Image';
+
+                        // If resolved (has data), show image preview
+                        if (ImageContextVariable.isResolved(imageVariable)) {
+                            return {
+                                range: new monaco.Range(position.lineNumber, startColumn, position.lineNumber, endColumn),
+                                contents: [
+                                    { value: `**${imageName}**` },
+                                    { value: `![${imageName}](data:${imageVariable.mimeType};base64,${imageVariable.data})`, isTrusted: true }
+                                ]
+                            };
+                        }
+
+                        // If path-based, show open link
+                        if (imageVariable.wsRelativePath) {
+                            const openImageLabel = nls.localize('theia/ai/chat-ui/openImage', 'Open image');
+                            const commandArg = encodeURIComponent(JSON.stringify(imageVariable.wsRelativePath));
+                            const openLink = `[${openImageLabel}](command:${OPEN_FILE_BY_PATH_COMMAND.id}?${commandArg})`;
+                            return {
+                                range: new monaco.Range(position.lineNumber, startColumn, position.lineNumber, endColumn),
+                                contents: [
+                                    { value: `**${imageName}**` },
+                                    { value: openLink, isTrusted: true }
+                                ]
+                            };
+                        }
+                    }
+                }
+
+                // Otherwise, try to parse as JSON (for full inline references or path-based)
+                try {
+                    const parsed = ImageContextVariable.parseArg(arg);
+                    if (ImageContextVariable.isResolved(parsed)) {
+                        const imageName = parsed.name ?? parsed.wsRelativePath ?? 'Image';
+                        return {
+                            range: new monaco.Range(position.lineNumber, startColumn, position.lineNumber, endColumn),
+                            contents: [
+                                { value: `**${imageName}**` },
+                                { value: `![${imageName}](data:${parsed.mimeType};base64,${parsed.data})`, isTrusted: true }
+                            ]
+                        };
+                    } else if (parsed.wsRelativePath) {
+                        // Path-based reference - provide a link to open the file
+                        const imageName = parsed.name ?? parsed.wsRelativePath;
+                        const openImageLabel = nls.localize('theia/ai/chat-ui/openImage', 'Open image');
+                        const commandArg = encodeURIComponent(JSON.stringify(parsed.wsRelativePath));
+                        const openLink = `[${openImageLabel}](command:${OPEN_FILE_BY_PATH_COMMAND.id}?${commandArg})`;
+                        return {
+                            range: new monaco.Range(position.lineNumber, startColumn, position.lineNumber, endColumn),
+                            contents: [
+                                { value: `**${imageName}**` },
+                                { value: openLink, isTrusted: true }
+                            ]
+                        };
+                    }
+                } catch {
+                    // Invalid JSON, ignore
+                }
+            }
+        }
+
+        return undefined;
+    }
+
     protected registerStandardCompletionProvider<T>(source: CompletionSource<T>): void {
         monaco.languages.registerCompletionItemProvider(CHAT_VIEW_LANGUAGE_ID, {
-            triggerCharacters: [source.triggerCharacter],
+            triggerCharacters: source.deferMarker ? [source.triggerCharacter, source.deferMarker] : [source.triggerCharacter],
             provideCompletionItems: (model, position, _context, _token): ProviderResult<monaco.languages.CompletionList> =>
                 this.provideCompletions(model, position, source),
         });
     }
 
-    getCompletionRange(model: monaco.editor.ITextModel, position: monaco.Position, triggerCharacter: string): monaco.Range | undefined {
+    getCompletionRange(model: monaco.editor.ITextModel, position: monaco.Position, triggerCharacter: string, deferMarker?: string): monaco.Range | undefined {
         const wordInfo = model.getWordUntilPosition(position);
         const lineContent = model.getLineContent(position.lineNumber);
         // one to the left, and -1 for 0-based index
         const characterBeforeCurrentWord = lineContent[wordInfo.startColumn - 1 - 1];
 
-        if (characterBeforeCurrentWord !== triggerCharacter) {
+        // 1-based column of the trigger character. The trigger may be directly before the
+        // current word (e.g. `~tool`) or separated by the optional defer marker (e.g. `~?tool`).
+        let triggerColumn: number | undefined;
+        if (characterBeforeCurrentWord === triggerCharacter) {
+            triggerColumn = wordInfo.startColumn - 1;
+        } else if (deferMarker && characterBeforeCurrentWord === deferMarker && lineContent[wordInfo.startColumn - 1 - 2] === triggerCharacter) {
+            triggerColumn = wordInfo.startColumn - 2;
+        }
+
+        if (triggerColumn === undefined) {
             return undefined;
         }
 
         // we are not at the beginning of the line
-        if (wordInfo.startColumn > 2) {
-            const charBeforeTrigger = model.getValueInRange({
-                startLineNumber: position.lineNumber,
-                startColumn: wordInfo.startColumn - 2,
-                endLineNumber: position.lineNumber,
-                endColumn: wordInfo.startColumn - 1
-            });
+        if (triggerColumn > 1) {
+            // -1 for the character before the trigger, -1 for 0-based index
+            const charBeforeTrigger = lineContent[triggerColumn - 1 - 1];
             // If the character before the trigger is not whitespace, don't provide completions
             if (!/\s/.test(charBeforeTrigger)) {
                 return undefined;
@@ -165,7 +280,7 @@ export class ChatViewLanguageContribution implements FrontendApplicationContribu
         position: monaco.Position,
         source: CompletionSource<T>
     ): ProviderResult<monaco.languages.CompletionList> {
-        const completionRange = this.getCompletionRange(model, position, source.triggerCharacter);
+        const completionRange = this.getCompletionRange(model, position, source.triggerCharacter, source.deferMarker);
         if (completionRange === undefined) {
             return { suggestions: [] };
         }

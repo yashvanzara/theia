@@ -15,14 +15,17 @@
 // *****************************************************************************
 
 import { LanguageModelRequirement } from '@theia/ai-core/lib/common';
-import { injectable } from '@theia/core/shared/inversify';
+import { inject, injectable, named } from '@theia/core/shared/inversify';
 import { AbstractStreamParsingChatAgent } from '@theia/ai-chat/lib/common/chat-agents';
-import { nls } from '@theia/core';
+import { ILogger, nls } from '@theia/core';
 import { universalTemplate, universalTemplateVariant } from './universal-prompt-template';
 
 export const UniversalChatAgentId = 'Universal';
 @injectable()
 export class UniversalChatAgent extends AbstractStreamParsingChatAgent {
+    @inject(ILogger) @named('ai-ide:UniversalChatAgent')
+    protected override readonly logger: ILogger;
+
    id: string = UniversalChatAgentId;
    name = UniversalChatAgentId;
    languageModelRequirements: LanguageModelRequirement[] = [{
@@ -37,4 +40,5 @@ export class UniversalChatAgent extends AbstractStreamParsingChatAgent {
 
    override prompts = [{ id: 'universal-system', defaultVariant: universalTemplate, variants: [universalTemplateVariant] }];
    protected override systemPromptId: string = 'universal-system';
+   override iconClass: string = 'codicon codicon-comment';
 }

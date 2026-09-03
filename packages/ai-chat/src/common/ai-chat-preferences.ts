@@ -22,6 +22,7 @@ export const PIN_CHAT_AGENT_PREF = 'ai-features.chat.pinChatAgent';
 export const BYPASS_MODEL_REQUIREMENT_PREF = 'ai-features.chat.bypassModelRequirement';
 export const PERSISTED_SESSION_LIMIT_PREF = 'ai-features.chat.persistedSessionLimit';
 export const SESSION_STORAGE_PREF = 'ai-features.chat.sessionStorageScope';
+export const WELCOME_SCREEN_SESSIONS_PREF = 'ai-features.chat.welcomeScreenSessions';
 
 export type SessionStorageScope = 'workspace' | 'global';
 
@@ -58,9 +59,23 @@ export const aiChatPreferences: PreferenceSchema = {
             minimum: -1,
             title: AI_CORE_PREFERENCES_TITLE,
         },
+        [WELCOME_SCREEN_SESSIONS_PREF]: {
+            type: 'number',
+            description: nls.localize('theia/ai/chat/welcomeScreenSessions/description',
+                'Maximum number of chat sessions to show on the chat overview (home view). Active sessions are filled first; ' +
+                'overflow is accessible via the "Browse all chats..." link. Lower this if a higher editor zoom causes a scrollbar. ' +
+                'Set to 0 to hide the inline list entirely; sessions remain accessible via the "Browse all chats..." link.'),
+            default: 20,
+            minimum: 0,
+            title: AI_CORE_PREFERENCES_TITLE,
+        },
         [SESSION_STORAGE_PREF]: {
             type: 'string',
             enum: ['workspace', 'global'] satisfies SessionStorageScope[],
+            enumItemLabels: [
+                nls.localizeByDefault('Workspace'),
+                nls.localizeByDefault('Global')
+            ],
             enumDescriptions: [
                 nls.localize('theia/ai/chat/sessionStorageScope/workspace',
                     'Store chat sessions in workspace-specific metadata storage. Sessions are associated with the workspace but stored outside the workspace directory.'),

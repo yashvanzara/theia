@@ -46,6 +46,12 @@ The project maintains the following source code repositories:
 
 This project leverages the following third party content.
 
+API type declarations mirrored from project github/copilot-sdk (1.0.9)
+
+* License: MIT
+* Project: <https://github.com/github/copilot-sdk>
+* Source: <https://github.com/github/copilot-sdk>
+
 chalk (2.4.1)
 
 * License: MIT
@@ -207,6 +213,12 @@ Icons copied from microsoft/vscode-icons version:
 b73945c70f1117c4e65939dd3e10bdd623cb4ef3 (n/a)
 
 * License: CC-BY-4.0
+
+intellij-community (2025.2.4)
+
+* License: Apache-2.0
+* Project: <https://github.com/JetBrains/intellij-community>
+* Source: <https://github.com/JetBrains/intellij-community>
 
 inversify (5.0.1)
 

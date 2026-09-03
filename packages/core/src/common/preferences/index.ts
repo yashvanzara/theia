@@ -16,6 +16,7 @@
 
 export * from './defaults-preference-provider';
 export * from './preference-language-override-service';
+export * from './session-preference-provider';
 export * from './preference-provider-impl';
 export * from './preference-provider';
 export * from './preference-schema-service';
@@ -25,3 +26,4 @@ export * from './preference-service';
 export * from './injectable-preference-proxy';
 export * from './preference-proxy';
 export * from './preference-configurations';
+export * from './preference-utils';
